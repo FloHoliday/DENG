@@ -7,3 +7,8 @@ requires-python = ">=3.13"
 dependencies = [
     "requests>=2.34.2,<3.0.0",
 ]
+
+[dependency-groups]
+dev = [
+    "ruff>=0.16.9,<0.17.0",
+]
