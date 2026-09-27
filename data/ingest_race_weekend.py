@@ -1,4 +1,4 @@
-"""Fetch the raw OpenF1 data for one race weekend and save it unchanged as JSON."""
+"""Ingest step: fetch the raw OpenF1 data for one race weekend and save it unchanged as JSON."""
 
 import argparse
 import json

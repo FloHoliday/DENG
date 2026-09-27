@@ -1,7 +1,7 @@
 [project]
 name = "deng"
 version = "0.1.0"
-description = "Add your description here"
+description = "Formula 1 Data Pipeline"
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
