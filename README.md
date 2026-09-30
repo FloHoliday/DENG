@@ -166,7 +166,7 @@ The store step is not implemented yet.
 
 ## 4. Architecture v0.1
 
-The pipeline runs batch, one race weekend (meeting) at a time. **Dagster**
+The pipeline runs batch, one race weekend (meeting) at a time. **Orchestrator**
 orchestrates it: each step is an asset partitioned by meeting, so a single
 race weekend can be re-run or backfilled on its own, with retries on
 failure. Store and Serve run on PostgreSQL (Docker Compose) for the midterm
@@ -177,7 +177,7 @@ destination changes.
 flowchart LR
     source["Source<br/>OpenF1 REST API<br/>Race + Sprint sessions<br/>JSON per endpoint"]
 
-    subgraph dagster["Dagster: one run per race weekend, retries, backfills"]
+    subgraph orchestrator["Orchestrator: one run per race weekend, retries, backfills"]
         ingest["Ingest<br/>Python batch job<br/>ingest_race_weekend.py<br/>full backfill 2023–2025<br/>+ incremental 2026"]
         store["Store<br/>staging tables<br/>schema-on-write (dlt)<br/>merge by session key"]
         transform["Transform<br/>SQL / dbt<br/>clean, join, aggregate<br/>car_data to lap grain"]
@@ -208,7 +208,7 @@ environments):
 - [ ] Lap-level aggregation of `car_data`
 - [ ] Define and implement first justified transformation (lap-grain fact
   table with tyre/weather/safety-car enrichment)
-- [ ] Set up Dagster. Wire up ingest → store → transform as assets
+- [ ] Set up Orchestrator. Wire up ingest → store → transform as assets
   partitioned per meeting, with rerun/backfill support
 - [ ] Draft Architecture v0.2 reflecting implementation decisions
 - [ ] Write setup, execution, and verification instructions for midterm
@@ -220,7 +220,7 @@ environments):
 /data/raw       - raw JSON downloaded by ingestion (gitignored)
 /store          - dlt pipeline: loads data/raw into staging tables (planned)
 /transform      - dbt project: cleaning/aggregation/modeling (planned)
-/orchestration  - Dagster definitions: assets, meeting partitions, schedules
+/orchestration  - Orchestrator definitions: assets, meeting partitions, schedules
 /infra          - Terraform (final milestone)
 /docs           - architecture diagrams, decisions
 README.md
