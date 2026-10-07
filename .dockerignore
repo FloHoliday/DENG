@@ -1,4 +1,4 @@
 *
-!data/ingest_race_weekend.py
+!scripts/ingest_race_weekend.py
 !pyproject.toml
 !uv.lock

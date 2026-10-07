@@ -91,9 +91,9 @@ responses unchanged as raw JSON files. It does not touch the database;
 loading the files into the database is the
 [store step](#3-initial-ingestion-and-storage-strategy).
 
-- **Script:** `data/ingest_race_weekend.py` downloads the Race and Sprint
-  sessions of one race weekend (meeting) into `data/raw`, one JSON file per
-  endpoint/session.
+- **Script:** `scripts/ingest_race_weekend.py` downloads the Race and Sprint
+  sessions of all finished, non-cancelled race weekends since a given date
+  into `data/raw`, one JSON file per endpoint/session.
 - **Failure behaviour:** requests are throttled and retried with
   exponential backoff (429, 5xx, timeouts). A session folder gets a
   `_SUCCESS` marker (timestamp + row counts) only after all its endpoints
@@ -104,27 +104,21 @@ loading the files into the database is the
 ```bash
 uv sync
 
-# by year + name (substring of meeting name, location, country or circuit)
-uv run data/ingest_race_weekend.py --year 2025 --meeting "monza"
-
-# by year only: pick the meeting from a list
-uv run data/ingest_race_weekend.py --year 2025
-
-# or by OpenF1 meeting_key
-uv run data/ingest_race_weekend.py --meeting-key 1268
+# all race weekends since 1 January 2025
+uv run scripts/ingest_race_weekend.py --since 2025-01-01
 ```
 
-| Flag               | Meaning                                  |
-|--------------------|------------------------------------------|
-| `--skip-telemetry` | don't fetch `car_data` (fast run, ~15 s) |
-| `--out-dir`     | target directory (default `data/raw`)    |
-| `--force`          | re-fetch files that already exist        |
+| Flag               | Meaning                                                      |
+|--------------------|--------------------------------------------------------------|
+| `--since`          | required: race weekends starting on or after this date (ISO) |
+| `--skip-telemetry` | don't fetch `car_data` (fast run, ~15 s per weekend)         |
+| `--out-dir`        | target directory (default `data/raw`)                        |
+| `--force`          | re-fetch files that already exist                            |
 
-If the name matches more than one meeting (e.g. `italy` → Imola and Monza),
-the script lists the candidates and asks which one to fetch. If it matches
-none, it lists all meetings of that year. When not run interactively (e.g.
-from an orchestrator) it exits with the list instead - use `--meeting-key`
-there.
+Race weekends are found via
+`/meetings?date_start>=<since>&date_end<=<today>&is_cancelled=false`, so a
+weekend that starts before `--since` is skipped, and one that hasn't finished
+before today is left for the next run.
 
 > **Note:** during a live F1 session (any practice, qualifying, sprint or
 > race) OpenF1 denies access to all data, including past seasons. The script
@@ -142,11 +136,10 @@ The store step is not implemented yet.
 
 - **Mode:** batch, per race weekend (meeting). A meeting is stored once its
   ingestion has completed.
-- **Full vs. incremental:** incremental by session. Historical seasons
-  (2023–2025) are ingested and stored once as a full backfill since they
+- **Full vs. incremental:** incremental by session. Historical seasons (2023–2025) are ingested and stored once as a
+  full backfill since they
   are static. The 2026 season is processed incrementally as new sessions complete,
-  keyed on `session_key`/`meeting_key` so re-runs are idempotent
-  (upsert/overwrite-by-key rather than blind append).
+  keyed on `session_key`/`meeting_key` so re-runs are idempotent (upsert/overwrite-by-key rather than blind append).
 - **Local storage (midterm):** raw JSON from `data/raw` is loaded into
   PostgreSQL as a raw/staging layer before transformation.
 - **Cloud storage (final):** the same steps load into BigQuery staging
@@ -185,7 +178,6 @@ flowchart LR
 
     serve["Serve<br/>descriptive /<br/>ML-ready tables<br/>fact_laps, fact_stints, …"]
     tf["Terraform [final]"]
-
     source --> ingest --> store --> transform --> serve
     tf -.->|provisions| store
     tf -.-> serve
@@ -201,7 +193,7 @@ environments):
 ## 5. Project plan / backlog (Week 3 → Week 7)
 
 - [x] Confirm team roles and split ingest/store vs. transform ownership
-- [x] Write ingest script for one race weekend (`data/ingest_race_weekend.py`)
+- [x] Write ingest script for one race weekend (`scripts/ingest_race_weekend.py`)
 - [x] Stand up local PostgreSQL + Docker Compose environment
 - [ ] Write store step: load `data/raw` (sessions with `_SUCCESS`) into
   PostgreSQL staging tables
