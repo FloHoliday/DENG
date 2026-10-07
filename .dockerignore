@@ -1,4 +1,7 @@
 *
-!scripts/ingest_race_weekend.py
+!scripts/ingest.py
+!src/
+!sql/
+!README.md
 !pyproject.toml
 !uv.lock

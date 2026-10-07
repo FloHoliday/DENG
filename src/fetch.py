@@ -1,6 +1,5 @@
 """Ingest step: fetch the raw OpenF1 data of all race weekends since a date and save it unchanged as JSON."""
 
-import argparse
 import json
 import re
 import sys
@@ -38,8 +37,10 @@ GRID_SESSION_NAMES = {
 
 
 class OpenF1Client:
-    def __init__(self) -> None:
+    def __init__(self, access_token: str | None = None) -> None:
         self._http = requests.Session()
+        if access_token:
+            self._http.headers["Authorization"] = f"Bearer {access_token}"
         self._last_request = 0.0
 
     def get(self, endpoint: str, params: dict) -> list[dict]:
@@ -138,11 +139,15 @@ def fetch_session(
     client: OpenF1Client,
     session: dict,
     meeting_dir: Path,
-    args: argparse.Namespace,
+    force: bool,
 ) -> bool:
     session_key = session["session_key"]
     session_dir = meeting_dir / f"{session_key}_{slug(session['session_name'])}"
     print(f"== {session['session_name']} (session_key={session_key}) -> {session_dir}")
+    # Keep the marker unchanged so the store step doesn't reload the session.
+    if (session_dir / "_SUCCESS").exists() and not force:
+        print("skip  session (complete)")
+        return True
 
     counts: dict[str, int] = {}
     failed = False
@@ -151,7 +156,7 @@ def fetch_session(
             counts[endpoint] = fetch_to_file(
                 client,
                 session_dir / f"{endpoint}.json",
-                args.force,
+                force,
                 endpoint,
                 session_key=session_key,
             )
@@ -174,7 +179,7 @@ def fetch_session(
             counts["starting_grid"] = fetch_to_file(
                 client,
                 session_dir / "starting_grid.json",
-                args.force,
+                force,
                 "starting_grid",
                 session_key=grid_sessions[0]["session_key"],
             )
@@ -182,10 +187,10 @@ def fetch_session(
         print(f"FAILED starting_grid: {exc}", file=sys.stderr)
         failed = True
 
-    if session["session_name"] == TELEMETRY_SESSION and not args.skip_telemetry:
+    if session["session_name"] == TELEMETRY_SESSION:
         if "drivers" in counts:
             try:
-                counts |= fetch_car_data(client, session_dir, session_key, args.force)
+                counts |= fetch_car_data(client, session_dir, session_key, force)
             except FETCH_ERRORS as exc:
                 print(f"FAILED car_data: {exc}", file=sys.stderr)
                 failed = True
@@ -204,7 +209,10 @@ def fetch_session(
 
 
 def fetch_meeting(
-    client: OpenF1Client, meeting: dict, args: argparse.Namespace
+    client: OpenF1Client,
+    meeting: dict,
+    raw_dir: Path,
+    force: bool,
 ) -> list[bool]:
     """Fetch the meeting metadata and the `selected` sessions; one result per session."""
     try:
@@ -217,7 +225,7 @@ def fetch_meeting(
         return [False] * len(SESSION_NAMES)
 
     meeting_dir = (
-        args.out_dir
+        raw_dir
         / str(meeting["year"])
         / f"{meeting['meeting_key']}_{slug(meeting['location'])}"
     )
@@ -227,40 +235,26 @@ def fetch_meeting(
     write_json(meeting_dir / "meeting.json", meeting)
     write_json(meeting_dir / "sessions.json", sessions)
 
-    return [fetch_session(client, s, meeting_dir, args) for s in sessions]
+    return [fetch_session(client, s, meeting_dir, force) for s in sessions]
 
 
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument(
-        "--since",
-        type=date.fromisoformat,
-        required=True,
-        help="ingest all race weekends starting on or after this date, e.g. 2025-01-01",
-    )
-    parser.add_argument(
-        "--skip-telemetry", action="store_true", help="do not fetch car_data"
-    )
-    parser.add_argument(
-        "--out-dir", type=Path, default=Path("data/raw"), help="default: data/raw"
-    )
-    parser.add_argument(
-        "-f", "--force", action="store_true", help="re-fetch existing files"
-    )
-    args = parser.parse_args()
+def run(
+    since: date,
+    raw_dir: Path = Path("data/raw"),
+    access_token: str | None = None,
+    force: bool = False,
+) -> int:
+    """Fetch all race weekends since `since` into `raw_dir`; returns the number of failed sessions."""
+    client = OpenF1Client(access_token)
 
-    client = OpenF1Client()
-
-    meetings = find_meetings(client, args.since)
+    meetings = find_meetings(client, since)
     if not meetings:
-        sys.exit(f"No meetings found since {args.since}")
+        sys.exit(f"No meetings found since {since}")
 
     results = []
     for meeting in meetings:
-        results += fetch_meeting(client, meeting, args)
-    if not all(results):
-        sys.exit(f"{results.count(False)} of {len(results)} sessions failed")
-
+        results += fetch_meeting(client, meeting, raw_dir, force)
     print(
-        f"Done: {len(results)} sessions from {len(meetings)} meetings fetched into {args.out_dir}"
+        f"Fetched {results.count(True)} of {len(results)} sessions from {len(meetings)} meetings into {raw_dir}"
     )
+    return results.count(False)
