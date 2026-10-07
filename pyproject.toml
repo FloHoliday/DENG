@@ -9,6 +9,7 @@ authors = [
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
+    "dlt[postgres,filesystem]>=1.31.0,<2.0.0",
     "requests>=2.34.2,<3.0.0",
 ]
 
@@ -16,3 +17,10 @@ dependencies = [
 dev = [
     "ruff>=0.16.9,<0.17.0",
 ]
+
+[build-system]
+requires = ["uv_build>=0.9.0,<0.10.0"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-name = "pipelines"

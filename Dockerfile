@@ -29,3 +29,5 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 # Put the project's venv first on PATH so `python` resolves to it
 ENV PATH="/app/.venv/bin:$PATH"
 
+ENTRYPOINT ["python"]
+CMD ["scripts/ingest_race_weekend_dlt.py"]

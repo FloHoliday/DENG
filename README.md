@@ -125,6 +125,50 @@ before today is left for the next run.
 > then stops with `OpenF1 access denied: Live F1 session in progress…` -
 > simply run it again after the session has ended.
 
+#### Alternative: ingest + store with dlt
+
+`scripts/ingest.py` fetches the same meetings, sessions and
+endpoints with dlt's `rest_api` source (based on the
+[dlthub Formula One template](https://dlthub.com/context/source/formula-one))
+and runs two dlt pipelines from `src/pipelines`:
+
+1. **`openf1_raw`** (API → files): writes the API responses unchanged as
+   JSONL to `data/raw/openf1/<table>/<load_id>.<file_id>.jsonl`. Nested
+   fields stay nested.
+2. **`openf1_staging`** (files → PostgreSQL): loads the new raw files into
+   staging tables in the dataset (schema) `openf1_raw`: one table per
+   endpoint, plus child tables for nested fields (e.g. `laps__segments_sector_1`).
+
+```bash
+docker compose up -d postgres
+docker compose run --rm code scripts/ingest_race_weekend_dlt.py --since 2025-01-01
+```
+
+| Flag               | Meaning                                                                      |
+|--------------------|------------------------------------------------------------------------------|
+| `--since`          | required: race weekends starting after this date (ISO), used on the first run |
+| `--skip-telemetry` | don't fetch or load `car_data`                                               |
+| `--raw-dir`        | raw file directory (default `data/raw`)                                      |
+
+- **Credentials:** `POSTGRES_HOST` (default `localhost`), `POSTGRES_PORT`
+  (default `5432`), `POSTGRES_DB`, `POSTGRES_USER`, `POSTGRES_PASSWORD`.
+  An optional `OPENF1_ACCESS_TOKEN` (paid OpenF1 key) is sent as a bearer
+  token, which allows ingestion during live sessions.
+- **Incremental:** stage 1 remembers the latest `meetings.date_start`
+  (pipeline state is kept in `data/raw/openf1/_dlt_pipeline_state`), so a
+  re-run only downloads race weekends that are new since the last run.
+  Stage 2 only loads raw files that are new since its last run. Because of
+  that, `--since` only matters on the first run. To backfill earlier weekends,
+  delete `data/raw/openf1`.
+- **Idempotent:** `meetings` and `sessions` are merged on their key, and all
+  per-session tables are replaced per `session_key` (delete-insert), so a
+  re-run never creates duplicates.
+- **All or nothing per stage:** a stage writes only after every request or
+  file was read successfully. If a request fails, nothing is written and the
+  state doesn't move, so the next run fetches the same weekends again.
+- **Starting grid:** `starting_grid` rows carry the *qualifying*
+  `session_key`. Join them to the Race/Sprint via `meeting_key`.
+
 ## 3. Initial ingestion and storage strategy
 
 The pipeline has three steps: **ingest** (OpenF1 API → raw JSON files, see
