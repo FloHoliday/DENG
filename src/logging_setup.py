@@ -15,3 +15,5 @@ def setup_logging(level: str = "INFO", log_file: Path | None = None) -> None:
         handlers=handlers,
         force=True,
     )
+    # One line per unit comes from the pipeline itself; per-request lines would only repeat it.
+    logging.getLogger("httpx").setLevel(logging.WARNING)

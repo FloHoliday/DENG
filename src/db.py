@@ -10,7 +10,9 @@ SQL_DIR = Path(__file__).parents[1] / "sql"
 
 
 def connect(settings: Settings) -> psycopg.Connection:
+    """Autocommit: each state update is durable at once; multi-statement work uses conn.transaction()."""
     return psycopg.connect(
+        autocommit=True,
         host=settings.postgres_host,
         port=settings.postgres_port,
         dbname=settings.postgres_db,

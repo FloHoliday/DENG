@@ -70,9 +70,13 @@ class RawStore:
         return gzip.decompress(self.fs.cat_file(f"{unit_dir}/{DATA_FILE}"))
 
     def read_records(self, unit_dir: str) -> list[dict]:
-        """The stored records; an empty result (`[]` or the 404 "No results found." body) gives []."""
-        data = json.loads(self.read_payload(unit_dir))
-        return data if isinstance(data, list) else []
+        return parse_records(self.read_payload(unit_dir))
+
+
+def parse_records(payload: bytes) -> list[dict]:
+    """The records of a stored payload; an empty result (`[]` or the 404 "No results found." body) gives []."""
+    data = json.loads(payload)
+    return data if isinstance(data, list) else []
 
 
 def _atomic_write(fs, path: str, data: bytes) -> None:
