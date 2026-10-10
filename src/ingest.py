@@ -8,6 +8,7 @@ import hashlib
 import logging
 import time
 import uuid
+from collections import Counter
 
 import psycopg
 from psycopg import sql
@@ -120,3 +121,26 @@ def load_partition(
         (time.monotonic() - start) * 1000,
     )
     return inserted
+
+
+def load(
+    conn: psycopg.Connection,
+    store: RawStore,
+    run_id: uuid.UUID,
+    keys: list[int] | None = None,
+    names: tuple[str, ...] = (),
+    force: bool = False,
+) -> Counter:
+    """Load every extracted partition (optionally only some keys/endpoints); one failure doesn't stop the rest."""
+    counts = Counter()
+    for endpoint, key in state.partitions(conn):
+        if (keys is not None and key not in keys) or (names and endpoint not in names):
+            continue
+        try:
+            rows = load_partition(conn, store, endpoint, key, run_id, force)
+        except (ReconciliationError, psycopg.Error, OSError, ValueError) as exc:
+            log.error("load %s %s failed, previous rows kept: %s", endpoint, key, exc)
+            counts["load_failed"] += 1
+            continue
+        counts["loaded" if rows is not None else "load_skipped"] += 1
+    return counts

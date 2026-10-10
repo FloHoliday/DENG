@@ -15,6 +15,7 @@ import typer
 
 import db
 import discovery
+import ingest
 import state
 from client import OpenF1Client
 from config import Settings, load_settings
@@ -119,7 +120,7 @@ def _run(
     except Exception:
         log.exception("%s failed", command)
         outcome, exit_code = "failed", 1
-    if ctx.counts["failed"] and exit_code == 0:
+    if (ctx.counts["failed"] or ctx.counts["load_failed"]) and exit_code == 0:
         outcome, exit_code = "failed", 1
     state.end_run(conn, ctx.run_id, outcome, dict(ctx.counts))
     if client:
@@ -174,6 +175,70 @@ def extract_cmd(
             print("\n".join(lines) or "Nothing to extract.")
 
     _run("extract", locals_params(locals()), body, with_client=True, now=now)
+
+
+@app.command("load")
+def load_cmd(
+    year: Year = None,
+    meeting_key: MeetingKey = None,
+    session_key: SessionKey = None,
+    endpoint: Endpoint = None,
+    profile: Profile = None,
+    force: Force = False,
+) -> None:
+    """Load completed partitions from the raw zone into raw.* (no API requests)."""
+
+    def body(ctx: Context) -> None:
+        filters = _filters(
+            ctx.settings, year, meeting_key, session_key, endpoint, profile
+        )
+        ctx.counts += ingest.load(
+            ctx.conn,
+            ctx.store,
+            ctx.run_id,
+            _race_keys(ctx, filters),
+            filters.endpoints,
+            force,
+        )
+
+    _run("load", locals_params(locals()), body)
+
+
+@app.command("run")
+def run_cmd(
+    year: Year = None,
+    meeting_key: MeetingKey = None,
+    session_key: SessionKey = None,
+    endpoint: Endpoint = None,
+    profile: Profile = None,
+    force: Force = False,
+    max_requests: MaxRequests = None,
+    now: Now = None,
+) -> None:
+    """Metadata refresh + extract + load."""
+
+    def body(ctx: Context) -> None:
+        filters = _filters(
+            ctx.settings, year, meeting_key, session_key, endpoint, profile
+        )
+        stop = None
+        try:
+            extract(ctx, filters, force, max_requests)
+        except StopRun as exc:
+            # Partitions completed before a clean stop (live window, --max-requests) are still loaded.
+            stop = exc
+        ctx.counts += ingest.load(
+            ctx.conn,
+            ctx.store,
+            ctx.run_id,
+            _race_keys(ctx, filters),
+            filters.endpoints,
+            force,
+        )
+        if stop:
+            raise stop
+
+    _run("run", locals_params(locals()), body, with_client=True, now=now)
 
 
 @app.command("status")
