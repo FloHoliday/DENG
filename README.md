@@ -17,13 +17,13 @@ curated view that answers two linked questions per circuit and per season:
 2. How hard is it to overtake at this circuit, and how much did grid
    position vs. race pace vs. strategy calls determine the final result?
 
-**Data product:** a curated, queryable table (or small set of tables) at **one row per driver per lap per session**,
-enriched with tyre compound and
+**Data product:** a curated, queryable table (or small set of tables) at
+**one row per driver per lap per race**, enriched with tyre compound and
 age, weather at that point in the race, safety-car/flag status, and
 lap-level aggregates of car telemetry (avg. throttle, % time at full
-throttle, max speed, brake-event count for race session only). Supporting tables cover pit stops,
-stints, and session results. This supports both descriptive analysis (degradation curves, overtaking-difficulty index
-per circuit) and a stretch
+throttle, max speed, brake-event count). Supporting tables cover pit stops,
+stints, and session results. This supports both descriptive analysis
+(degradation curves, overtaking-difficulty index per circuit) and a stretch
 ML use case (predicting the optimal pit-stop lap or lap time from stint
 age + conditions).
 
@@ -32,207 +32,171 @@ age + conditions).
 - **Source:** [OpenF1 API](https://openf1.org/docs/) - free, unofficial,
   community-run REST API for Formula 1 data. Not affiliated with the F1
   companies.
-- **Access method:** HTTP GET, JSON or CSV (`csv=true`), no authentication
-  required for historical data (2023 season onward). Filterable by session,
-  driver, and other attributes via query parameters. **Exception:** while any live F1 session (practice, qualifying,
-  sprint or
-  race) is in progress, access to **everything** is denied without a paid API
-  key - including all historical data (HTTP 401 "Live F1 session in
-  progress"). Free access returns once the session has ended.
-- **Sessions used:** only the **Race** and **Sprint** sessions of a race
-  weekend. Practice and qualifying laps are not used (the qualifying result
-  only enters through `starting_grid`).
-- **Endpoints used:**
-    - `meetings`, `sessions` - look up the race weekend and its `session_key`s
-    - `drivers` - driver ↔ team mapping (`dim_driver`, `dim_team`)
-    - `laps` - lap duration, sector times, per-lap grain (core fact table)
-    - `stints` - tyre compound, stint start/end lap, tyre age (degradation)
-    - `pit` - pit stop lap and duration (pit window / undercut)
-    - `position` - position changes over time, source for derived overtakes
-    - `intervals` - gap to the car ahead (was an undercut within pit-loss range?)
-    - `race_control` - flags and safety car, to exclude neutralised laps
-    - `weather` - ~1 row/minute, track/air temperature, rainfall (degradation)
-    - `session_result`, `starting_grid` - final classification vs. grid
-      position. OpenF1 keys the grid on the *qualifying* session, so it is
-      fetched from there and stored next to the Race/Sprint it belongs to.
-    - `car_data` - high-frequency telemetry (~3.7 Hz per car), **Race session
-      only**, fetched per driver and aggregated to lap grain during
-      transformation
-- **Not used:** `location` (no reliable lateral reference, very large),
-  `overtakes` (only available during races), `team_radio`
-  (coverage dropped sharply in 2026), all practice/qualifying laps.
+- **Access method:** HTTP GET, JSON, no authentication for historical data
+  (2023 onward). Rate limit 3 requests/second and 30 requests/minute.
+  **Exception:** from 30 min before until 30 min after any live F1 session,
+  the free API is blocked completely (HTTP 401), historical data included.
+- **Sessions used:** only **Race** sessions (`session_name = 'Race'`, not
+  cancelled), seasons 2023 → today. Sprint, qualifying and practice data are
+  not used. The qualifying session key is used only to fetch the
+  `starting_grid`, because OpenF1 keys the grid on qualifying.
+- **Endpoints used:** `meetings`, `sessions` (metadata, all session types,
+  needed for race discovery and the live-window guard), `drivers`, `laps`,
+  `stints`, `pit`, `position`, `race_control`, `session_result`, `weather`,
+  `intervals`, `starting_grid`, and `car_data` (telemetry, ~3.7 Hz, fetched
+  per driver).
+- **Not used:** `location` (very large, no reliable lateral reference),
+  `overtakes`, `team_radio`, everything outside Race sessions.
 - **Schema characteristics:** flat JSON records per endpoint, joinable via
-  `session_key`, `meeting_key`, and `driver_number`. No documented schema
-  versioning.
-- **Update frequency:** new sessions/meetings appear as each 2026 race
-  weekend happens, so the source grows throughout the semester. Data for
-  completed sessions is static once published.
-- **Volume:** most endpoints are tens to a few thousand rows per session (e.g. 2025 Austin Race: ~1,000 laps, ~20,000
-  intervals). `car_data` is the
-  only high-volume input at ~30,000+ rows per driver for a race (~130 MB of
-  raw JSON per race weekend) - the reason lap-level aggregation is planned
-  rather than storing raw telemetry in the curated layer.
-- **Known data-quality risks:**
-    - DRS status codes (2, 3, 9, 12, 14) are not fully documented/understood.
-    - Rate limit of **3 requests/second** (HTTP 429 when exceeded, observed
-      also under sustained load). The ingest script throttles and retries with
-      backoff.
-    - While a live F1 session is running, OpenF1 blocks **all** unauthenticated
-      requests (HTTP 401, including historical data) until it ends. Ingestion
-      must be scheduled outside live sessions (or use a paid API key). The
-      ingest script aborts with the API's message in that case.
-    - Telemetry cannot be requested for a whole session at once (HTTP 422
-      "too much data"), it has to be fetched per driver.
+  `session_key`, `meeting_key`, `driver_number`. Some fields are
+  polymorphic (e.g. `gap_to_leader` is a number or `"+1 LAP"`). There is no
+  schema versioning. Our findings are in [docs/api-notes.md](docs/api-notes.md).
+- **Update frequency:** a new race every one or two weeks during the season.
+  Data for a race may still change for a few days after it ends.
 
-### Ingesting the data
+## 3. Pipeline
 
-Ingestion means collecting the data from the OpenF1 API and saving the
-responses unchanged as raw JSON files. It does not touch the database;
-loading the files into the database is the
-[store step](#3-initial-ingestion-and-storage-strategy).
+Two decoupled stages, both started by hand through one CLI (`src/cli.py`):
 
-- **Script:** `scripts/ingest_race_weekend.py` downloads the Race and Sprint
-  sessions of all finished, non-cancelled race weekends since a given date
-  into `data/raw`, one JSON file per endpoint/session.
-- **Failure behaviour:** requests are throttled and retried with
-  exponential backoff (429, 5xx, timeouts). A session folder gets a
-  `_SUCCESS` marker (timestamp + row counts) only after all its endpoints
-  were downloaded, the script exits non-zero otherwise. Already-downloaded
-  files are skipped on re-run, so a failed ingestion is resumed simply by running
-  it again (`--force` forces a re-fetch).
+1. **Extract** (`src/fetch.py`): OpenF1 → **raw zone** (`data/raw`). Each
+   response is stored as its exact bytes, gzip-compressed, with a
+   `_manifest.json` (URL, params, HTTP status, record count, sha256, run id).
+   Extract is the only code that calls the API.
+2. **Load** (`src/ingest.py`): raw zone → PostgreSQL, one typed table per
+   endpoint in schema `raw`. Load reads only from the raw zone, so reloading
+   costs zero API calls, and an API outage can never corrupt the database.
+
+Pipeline state lives in schema `meta`:
+- `pipeline_run`: one row per command.
+- `extract_state`: one row per extract unit `(endpoint, race_session_key, chunk_key)`, with status `pending | done | empty | deferred | failed`.
+- `load_state`: one row per load partition `(endpoint, race_session_key)`, with a fingerprint of its files.
+
+The architecture, grain and failure handling are described in
+[docs/architecture.md](docs/architecture.md). The decisions behind them are
+in [docs/decisions/](docs/decisions/).
+
+**Failsafe and idempotent:**
+- Every unit's status is committed as soon as it finishes, so a rerun continues where the last run stopped (crash, Ctrl+C, `--max-requests`).
+- Units already `done`/`empty` are not fetched again, unless the race ended less than `SETTLING_DAYS` ago or `--force` is given.
+- Files are written atomically (temp file + rename, data before manifest).
+- A load replaces a whole partition in one transaction (DELETE + COPY). It checks that the row count matches the manifests and rolls back otherwise. A partition whose files have not changed is skipped.
+- During a live window, the remaining units become `deferred` and the run stops with exit code 0. An empty response within the settling window is also `deferred`.
+
+## 4. Setup
+
+Prerequisites: Docker, [uv](https://docs.astral.sh/uv/), Python 3.13 (uv installs it).
 
 ```bash
+cp .env.example .env              # adjust POSTGRES_PASSWORD etc.
+docker compose up -d postgres     # PostgreSQL 18 on 127.0.0.1:5432 (pgAdmin optional: docker compose up -d)
 uv sync
-
-# all race weekends since 1 January 2025
-uv run scripts/ingest_race_weekend.py --since 2025-01-01
+uv run src/cli.py init-db         # creates schemas meta and raw (idempotent)
 ```
 
-| Flag               | Meaning                                                      |
-|--------------------|--------------------------------------------------------------|
-| `--since`          | required: race weekends starting on or after this date (ISO) |
-| `--skip-telemetry` | don't fetch `car_data` (fast run, ~15 s per weekend)         |
-| `--out-dir`        | target directory (default `data/raw`)                        |
-| `--force`          | re-fetch files that already exist                            |
+The CLI runs on the host as `uv run src/cli.py <command>`. The project has
+no package, so there is no `f1` executable. Inside Docker it runs as
+`docker compose run --rm code <command>`.
 
-Race weekends are found via
-`/meetings?date_start>=<since>&date_end<=<today>&is_cancelled=false`, so a
-weekend that starts before `--since` is skipped, and one that hasn't finished
-before today is left for the next run.
+## 5. Commands
 
-> **Note:** during a live F1 session (any practice, qualifying, sprint or
-> race) OpenF1 denies access to all data, including past seasons. The script
-> then stops with `OpenF1 access denied: Live F1 session in progress…` -
-> simply run it again after the session has ended.
+| Command | What it does |
+|---|---|
+| `init-db` | apply `sql/*.sql` (idempotent) |
+| `extract [filters] [--force] [--max-requests N] [--dry-run]` | refresh metadata, then fetch all planned units into the raw zone |
+| `load [filters] [--force]` | load completed partitions into `raw.*` (no API calls) |
+| `run [filters] [--force] [--max-requests N]` | extract + load |
+| `status [filters]` | units per endpoint × status, failed/deferred units with their last error |
 
-## 3. Initial ingestion and storage strategy
+Filters: `--year 2025` (repeatable), `--meeting-key 1276`,
+`--session-key 9839`, `--endpoint laps` (repeatable), `--profile review`
+(only `REVIEW_SESSION_KEY`, the Abu Dhabi 2025 race). The hidden option
+`--now 2026-10-11T12:30:00Z` pretends a different time, to test the
+live-window guard.
 
-The pipeline has three steps: **ingest** (OpenF1 API → raw JSON files, see
-[Ingesting the data](#ingesting-the-data)), **store** (raw JSON → staging
-tables in the database, unchanged) and **transform** (staging → curated
-tables). The curated tables are what the pipeline **serves**: descriptive
-and ML-ready tables for analysis (see [Architecture](#4-architecture-v01)).
-The store step is not implemented yet.
+- `--dry-run` prints the planned units per race and makes no data requests. The metadata refresh still runs.
+- Exit codes: `0` success (deferred units allowed), `1` failed units or an unexpected error, `2` config or database connection error, `130` interrupted.
 
-- **Mode:** batch, per race weekend (meeting). A meeting is stored once its
-  ingestion has completed.
-- **Full vs. incremental:** incremental by session. Historical seasons (2023–2025) are ingested and stored once as a
-  full backfill since they
-  are static. The 2026 season is processed incrementally as new sessions complete,
-  keyed on `session_key`/`meeting_key` so re-runs are idempotent (upsert/overwrite-by-key rather than blind append).
-- **Local storage (midterm):** raw JSON from `data/raw` is loaded into
-  PostgreSQL as a raw/staging layer before transformation.
-- **Cloud storage (final):** the same steps load into BigQuery staging
-  tables and transform into curated BigQuery tables. Local storage is
-  used only for development/testing, never as a dependency of the production
-  path.
-- **Schema-on-write:** the database layers enforce a schema when data is
-  loaded, not when it is queried. dlt maps each endpoint's JSON to typed
-  staging tables, and its schema contract is set to reject new columns and
-  type changes. Because OpenF1 has no documented schema versioning, source
-  changes then fail the load visibly instead of silently reaching
-  transformation. dbt models define the curated schema, with tests on keys
-  and grain.
-- **Failure behaviour (planned):** only session folders with a `_SUCCESS`
-  marker are stored, so incomplete downloads never reach the database.
-  Each session is loaded in one transaction.
+### Review profile (for peer reviewers)
 
-## 4. Architecture v0.1
-
-The pipeline runs batch, one race weekend (meeting) at a time. **Orchestrator**
-orchestrates it: each step is an asset partitioned by meeting, so a single
-race weekend can be re-run or backfilled on its own, with retries on
-failure. Store and Serve run on PostgreSQL (Docker Compose) for the midterm
-and on BigQuery for the final; the pipeline code stays the same, only the
-destination changes.
-
-```mermaid
-flowchart LR
-    source["Source<br/>OpenF1 REST API<br/>Race + Sprint sessions<br/>JSON per endpoint"]
-
-    subgraph orchestrator["Orchestrator: one run per race weekend, retries, backfills"]
-        ingest["Ingest<br/>Python batch job<br/>ingest_race_weekend.py<br/>full backfill 2023–2025<br/>+ incremental 2026"]
-        store["Store<br/>staging tables<br/>schema-on-write (dlt)<br/>merge by session key"]
-        transform["Transform<br/>SQL / dbt<br/>clean, join, aggregate<br/>car_data to lap grain"]
-    end
-
-    serve["Serve<br/>descriptive /<br/>ML-ready tables<br/>fact_laps, fact_stints, …"]
-    tf["Terraform [final]"]
-    source --> ingest --> store --> transform --> serve
-    tf -.->|provisions| store
-    tf -.-> serve
+```bash
+uv run src/cli.py run --profile review     # ~38 requests, ~1.5 min
+uv run src/cli.py status --profile review
+docker compose exec -T postgres sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB"' < scripts/verify.sql
+uv run src/cli.py run --profile review     # again: only the 8 metadata requests, nothing reloaded
 ```
 
-**Serve: curated layer** (descriptive / ML-ready tables, same models in both
-environments):
+### Live-window guard demo
 
-- `fact_laps` (grain: 1 row per driver/lap/session)
-- `fact_pit_stops`, `fact_stints`, `fact_session_results`
-- `dim_driver`, `dim_team`, `dim_session`, `dim_circuit`
+`--force` makes the already completed review units get planned again:
 
-## 5. Project plan / backlog (Week 3 → Week 7)
+```bash
+uv run src/cli.py extract --profile review --force --now 2026-10-10T14:00:00Z
+# → "API is live: live window of session 11384 (Qualifying)", 10 units deferred, exit 0
+uv run src/cli.py extract --profile review   # picks the deferred units up again
+```
 
-- [x] Confirm team roles and split ingest/store vs. transform ownership
-- [x] Write ingest script for one race weekend (`scripts/ingest_race_weekend.py`)
-- [x] Stand up local PostgreSQL + Docker Compose environment
-- [ ] Write store step: load `data/raw` (sessions with `_SUCCESS`) into
-  PostgreSQL staging tables
+## 6. Verification
+
+[scripts/verify.sql](scripts/verify.sql) shows:
+- row counts per table for the review race
+- reconciliation of `meta.load_state` against the tables
+- extract units by status, and the failed/deferred units
+- sanity checks: drivers per race, grid coverage, `car_data` value ranges, duplicate laps
+
+Tests:
+
+```bash
+uv run pytest -m "not db"   # unit tests, no network, no database
+uv run pytest -m db         # integration tests against the compose Postgres (uses a throwaway f1_test database)
+uv run ruff check . && uv run ruff format --check .
+```
+
+## 7. Expected runtimes and volumes
+
+- ~85–90 races from 2023 to today. Each race takes ≈ 10 session-level requests + 20 `car_data` requests (one per driver).
+- Full backfill ≈ 2,700 requests ≈ **1 h 45 min** at 25 requests/minute. The `--max-requests` option splits it into several runs.
+- After a race weekend: ≈ 38 requests (~1.5 min), 8 of them the metadata refresh.
+- `car_data` ≈ 33k rows per driver per race, ≈ 0.67 M rows per race, ≈ 55–60 M rows in total (several GB including indexes). Loading one race's `car_data` takes ~7 s. All other endpoints are small: `intervals` ≈ 26k rows per race, the rest below 2k.
+
+## 8. Project plan / backlog
+
+- [x] Ingest script for one race weekend, local PostgreSQL + Docker Compose
+- [x] Stateful extract/load pipeline with raw zone, state tables and tests
 - [ ] Lap-level aggregation of `car_data`
-- [ ] Define and implement first justified transformation (lap-grain fact
-  table with tyre/weather/safety-car enrichment)
-- [ ] Set up Orchestrator. Wire up ingest → store → transform as assets
-  partitioned per meeting, with rerun/backfill support
-- [ ] Draft Architecture v0.2 reflecting implementation decisions
-- [ ] Write setup, execution, and verification instructions for midterm
+- [ ] First justified transformation (lap-grain fact table with tyre/weather/safety-car enrichment)
+- [ ] Orchestrator calling the same functions (`refresh_metadata`, `extract`, `ingest.load`)
+- [ ] Architecture v0.2, move to GCS + BigQuery
 
-## 6. Repository structure
+## 9. Repository structure
 
-Based on [Cookiecutter Data Science](https://cookiecutter-data-science.drivendata.org/)
-layout, with the pipeline code grouped under `src/`.
+Based on the [Cookiecutter Data Science](https://cookiecutter-data-science.drivendata.org/)
+layout. The pipeline modules sit directly in `src/`, without a package.
 
 - `README.md`: this file
 - `pyproject.toml`, `uv.lock`: project metadata and pinned dependencies (uv)
-- `Dockerfile`, `docker-compose.yml`: pipeline image and local PostgreSQL
-- `.env.example`: credentials template, copy to `.env`
+- `Dockerfile`, `docker-compose.yml`: pipeline image, local PostgreSQL, pgAdmin
+- `.env.example`: all configuration keys, copy to `.env`
 - `data/`: local data, gitignored
-  - `raw/`: raw OpenF1 JSON, immutable
-  - `interim/`: intermediate, transformed data
-  - `processed/`: final data sets for modeling
-  - `external/`: data from third-party sources
-- `notebooks/`: exploration, named `<nr>-<initials>-<description>`
-- `scripts/`: command-line entry points, e.g. ingestion runs
-- `src/`: source code of the pipeline
-  - `pipelines/`: dlt ingestion pipelines
-  - `transform/`: dbt project, staging → curated tables
-  - `orchestration/`: Orchestrator assets, meeting partitions, schedules
-  - `infra/`: Terraform for BigQuery
+  - `raw/`: raw zone, `openf1/v1/<endpoint>/year=…/meeting_key=…/session_key=…/[driver_number=…/]data.json.gz` + `_manifest.json`
+- `docs/`: `BRIEFING.md` (the task), `api-notes.md` (API findings), `architecture.md`, `decisions/` (ADRs)
+- `scripts/`: `verify.sql` (verification queries)
+- `sql/`: `001_meta.sql` (state tables), `002_raw.sql` (one typed table per endpoint)
+- `src/`: pipeline modules
+  - `cli.py`: command line (typer), a thin wrapper
+  - `config.py`, `logging_setup.py`, `db.py`: settings from env, logging, connection + DDL
+  - `client.py`: httpx + rate limiter + retries; `classify.py`: response → unit status
+  - `endpoints.py`: endpoint registry; `discovery.py`: race selection, live-window guard
+  - `raw_store.py`: raw zone paths, atomic writes, manifests
+  - `state.py`: access to the `meta` tables
+  - `fetch.py`: extract (planner + runner); `ingest.py`: load
+- `tests/`: `unit/` (no network, no DB), `integration/` (marker `db`)
 
-## 7. Limitations (known so far)
+## 10. Known limitations
 
-- OpenF1 is an unofficial, community-maintained API with no SLA and a
-  3 requests/second rate limit. Ingestion reliability depends on its uptime.
-- The free API is completely unavailable during live F1 sessions (all
-  endpoints, including historical data), so ingestion can only run outside
-  session times unless a paid API key is used.
-- DRS and lateral-position telemetry fields have documented ambiguity and
-  are not used for quantitative conclusions without caveats.
+- No data can be fetched during live windows (30 min before to 30 min after any session). Runs then stop and defer the remaining work.
+- A full backfill takes ~2 h because of the 30 requests/minute limit. Extraction is sequential on purpose (ADR 0005).
+- OpenF1 is unofficial and partly undocumented, with no SLA. We verified the empty-result format (404 "No results found.") and the grid key ourselves. The blackout status (401 vs. 403) and `Retry-After` on 429 are unverified, see [docs/api-notes.md](docs/api-notes.md).
+- The starting grid can omit pit-lane starters.
+- `car_data.throttle` contains the value 104, outside the documented 0–100 range.
+- `drivers.country_code` and `pit.pit_duration` are deprecated and will disappear after 2026. The columns stay nullable. New fields land in `_extra`.
+- DRS status codes are not fully documented.

@@ -78,6 +78,16 @@ class FakeApi:
         return httpx.Response(200, json=[{"session_key": 9839, "driver_number": 1}])
 
 
+class Interrupting(FakeApi):
+    """Simulates Ctrl+C while the `pit` request is in flight."""
+
+    def __call__(self, request, endpoint):
+        if endpoint == "pit" and not getattr(self, "interrupted", False):
+            self.interrupted = True
+            raise KeyboardInterrupt
+        return super().__call__(request, endpoint)
+
+
 class NoLimit:
     def try_acquire(self, name):
         pass
@@ -135,3 +145,22 @@ def test_no_car_data_without_drivers(db_settings, conn, store, api):
     # The 9 complete race partitions load; drivers (failed) is skipped, metadata was loaded by extract.
     assert ingest.load(conn, store, uuid.uuid4())["loaded"] == 9
     assert conn.execute("SELECT count(*) FROM raw.drivers").fetchone()[0] == 0
+
+
+def test_interrupted_run_resumes_without_duplicates(db_settings, conn, store):
+    with respx.mock(base_url=db_settings.openf1_base_url) as mock:
+        mock.get(path__regex=r"/(?P<endpoint>\w+)$").mock(side_effect=Interrupting())
+        with pytest.raises(KeyboardInterrupt):
+            extract(context(db_settings, conn, store), Filters())
+        units = statuses(conn)
+        assert units[("laps", "all")] == "done"
+        assert units[("pit", "all")] == "pending"  # the interrupted unit
+        assert not list(store.fs.glob(f"{store.root}/**/*.tmp"))
+
+        ingest.load(conn, store, uuid.uuid4())  # partial load of what is complete
+        extract(context(db_settings, conn, store), Filters())  # rerun continues
+    units = statuses(conn)
+    assert set(units.values()) == {"done", "empty"}
+    ingest.load(conn, store, uuid.uuid4())
+    assert conn.execute("SELECT count(*) FROM raw.laps").fetchone()[0] == 1
+    assert conn.execute("SELECT count(*) FROM raw.car_data").fetchone()[0] == 2

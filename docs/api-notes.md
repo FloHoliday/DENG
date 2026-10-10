@@ -23,6 +23,7 @@ Review race: Abu Dhabi 2025, `meeting_key 1276`, Race `session_key 9839`, Qualif
 - `drivers.country_code` is already `null` for every row (deprecated). `drivers.headshot_url` is sometimes null.
 - `laps.segments_sector_*` are integer lists, e.g. `[2048, 2049, 2051]`, which map to `integer[]`. `duration_sector_1` and `i1_speed` are null on lap 1.
 - `car_data` for 9839 has **exactly 33,653 rows for every driver**, all on the same timestamps (12:06:20.939 → 14:36:56.037). Each file holds only its own `driver_number`, and the files differ (different sha256). The cars share one sample clock, so this is not a bug.
+- `car_data.throttle` is **104** in 20,604 of 673,060 samples for 9839 (all 20 drivers). That value is outside the documented 0–100 range and is probably a sensor/sentinel value. The raw layer keeps it unchanged. Transformations must treat it as unknown/full throttle.
 - Every timestamp carries an explicit `+00:00` offset, so it parses straight into `timestamptz`.
 - The 9839 grid has 20 rows. The briefing's note about 18-row grids (missing pit-lane starters) still stands for other races and is not an error.
 - 2026 Singapore weekend (`meeting_key 1296`): Sprint 10 Oct 09:00–10:00 UTC, Qualifying 10 Oct 13:30–14:30 UTC, Race 11 Oct. This weekend can be used to demo the live-window guard with `--now`.
