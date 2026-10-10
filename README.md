@@ -205,19 +205,27 @@ environments):
 - [ ] Draft Architecture v0.2 reflecting implementation decisions
 - [ ] Write setup, execution, and verification instructions for midterm
 
-## 6. Repository structure [TBD - update as it firms up]
+## 6. Repository structure
 
-```
-/data           - ingest script: OpenF1 API → raw JSON (ingest_race_weekend.py)
-/data/raw       - raw JSON downloaded by ingestion (gitignored)
-/store          - dlt pipeline: loads data/raw into staging tables (planned)
-/transform      - dbt project: cleaning/aggregation/modeling (planned)
-/orchestration  - Orchestrator definitions: assets, meeting partitions, schedules
-/infra          - Terraform (final milestone)
-/docs           - architecture diagrams, decisions
-README.md
-.env.example
-```
+Based on [Cookiecutter Data Science](https://cookiecutter-data-science.drivendata.org/)
+layout, with the pipeline code grouped under `src/`.
+
+- `README.md`: this file
+- `pyproject.toml`, `uv.lock`: project metadata and pinned dependencies (uv)
+- `Dockerfile`, `docker-compose.yml`: pipeline image and local PostgreSQL
+- `.env.example`: credentials template, copy to `.env`
+- `data/`: local data, gitignored
+  - `raw/`: raw OpenF1 JSON, immutable
+  - `interim/`: intermediate, transformed data
+  - `processed/`: final data sets for modeling
+  - `external/`: data from third-party sources
+- `notebooks/`: exploration, named `<nr>-<initials>-<description>`
+- `scripts/`: command-line entry points, e.g. ingestion runs
+- `src/`: source code of the pipeline
+  - `pipelines/`: dlt ingestion pipelines
+  - `transform/`: dbt project, staging → curated tables
+  - `orchestration/`: Orchestrator assets, meeting partitions, schedules
+  - `infra/`: Terraform for BigQuery
 
 ## 7. Limitations (known so far)
 

@@ -1,7 +1,11 @@
 [project]
-name = "deng"
-version = "0.1.0"
+name = "deng-f1"
 description = "Formula 1 Data Pipeline"
+version = "0.1.0"
+authors = [
+    {name = "Florian Item", email = "florian.item@stud.hslu.ch"},
+    {name = "Florian Leimer", email = "florian.leimer@stud.hslu.ch"},
+]
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
