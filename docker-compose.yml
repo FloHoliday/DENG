@@ -5,6 +5,9 @@ services:
       POSTGRES_DB: ${POSTGRES_DB:?Set POSTGRES_DB in .env}
       POSTGRES_USER: ${POSTGRES_USER:?Set POSTGRES_USER in .env}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+    # The pipeline runs on the host (`uv run src/cli.py ...`) and connects here.
+    ports:
+      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
     volumes:
       - postgres_data:/var/lib/postgresql
     healthcheck:
@@ -27,24 +30,19 @@ services:
         condition: service_healthy
 
   code:
+    image: deng-f1-code:local
     build: .
+    profiles: ["tools"]
+    env_file: .env
+    # Inside the compose network Postgres is reached by service name on its container port.
     environment:
       POSTGRES_HOST: postgres
-      POSTGRES_DB: ${POSTGRES_DB:?Set POSTGRES_DB in .env}
-      POSTGRES_USER: ${POSTGRES_USER:?Set POSTGRES_USER in .env}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+      POSTGRES_PORT: 5432
     volumes:
-      - ./data/raw:/app/data/raw
+      - ./data:/app/data
     depends_on:
       postgres:
         condition: service_healthy
-    develop:
-      watch:
-        - action: sync
-          path: .
-          target: /app
-        - action: rebuild
-          path: ./uv.lock
 
 volumes:
   postgres_data:
