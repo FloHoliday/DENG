@@ -5,7 +5,7 @@ storage, a CLI and Postgres bulk loading. We also have to explain every line
 in the oral defence.
 
 **Decision (approach B).**
-- Proven libraries for the generic parts: `httpx` (HTTP), `tenacity` (retries), `pyrate-limiter` (3/s and 25/min), `fsspec` (storage), `psycopg` 3 (`COPY`), `typer` (CLI), `python-dotenv` (config).
+- Proven libraries for the generic parts: `httpx` (HTTP), `tenacity` (retries), `pyrate-limiter` (3/s and 25/min), `fsspec` (storage), `psycopg` 3 (`COPY`), `python-dotenv` (config). The CLI uses the standard library's `argparse`.
 - Our own small code for everything pipeline-specific: planning, unit state, classification, partition load.
 
 **Alternatives.**

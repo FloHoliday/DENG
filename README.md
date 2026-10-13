@@ -56,7 +56,7 @@ age + conditions).
 
 ## 3. Pipeline
 
-Two decoupled stages, both started by hand through one CLI (`src/cli.py`):
+Two decoupled stages, both started by hand through one CLI (`scripts/f1.py`):
 
 1. **Extract** (`src/fetch.py`): OpenF1 → **raw zone** (`data/raw`). Each
    response is stored as its exact bytes, gzip-compressed, with a
@@ -89,12 +89,11 @@ Prerequisites: Docker, [uv](https://docs.astral.sh/uv/), Python 3.13 (uv install
 cp .env.example .env              # adjust POSTGRES_PASSWORD etc.
 docker compose up -d postgres     # PostgreSQL 18 on 127.0.0.1:5432 (pgAdmin optional: docker compose up -d)
 uv sync
-uv run src/cli.py init-db         # creates schemas meta and raw (idempotent)
+uv run scripts/f1.py init-db      # creates schemas meta and raw (idempotent)
 ```
 
-The CLI runs on the host as `uv run src/cli.py <command>`. The project has
-no package, so there is no `f1` executable. Inside Docker it runs as
-`docker compose run --rm code <command>`.
+The CLI runs on the host as `uv run scripts/f1.py <command>` (`--help` lists
+the options). Inside Docker it runs as `docker compose run --rm code <command>`.
 
 ## 5. Commands
 
@@ -118,9 +117,9 @@ The fixed tuning values sit as constants at the top of the modules that use them
 ### Review race (for peer reviewers)
 
 ```bash
-uv run src/cli.py run --session-key 9839   # Abu Dhabi 2025: ~38 requests, ~1.5 min
+uv run scripts/f1.py run --session-key 9839   # Abu Dhabi 2025: ~38 requests, ~1.5 min
 docker compose exec -T postgres sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB"' < scripts/verify.sql
-uv run src/cli.py run --session-key 9839   # again: only the 8 metadata requests, nothing reloaded
+uv run scripts/f1.py run --session-key 9839   # again: only the 8 metadata requests, nothing reloaded
 ```
 
 ### Live-window guard demo
@@ -128,9 +127,9 @@ uv run src/cli.py run --session-key 9839   # again: only the 8 metadata requests
 `--force` makes the already completed units get planned again:
 
 ```bash
-uv run src/cli.py extract --session-key 9839 --force --now 2026-10-10T14:00:00Z
+uv run scripts/f1.py extract --session-key 9839 --force --now 2026-10-10T14:00:00Z
 # → "API is live: live window of session 11384 (Qualifying)", 10 units deferred, exit 0
-uv run src/cli.py extract --session-key 9839   # picks the deferred units up again
+uv run scripts/f1.py extract --session-key 9839   # picks the deferred units up again
 ```
 
 ## 6. Verification
@@ -171,10 +170,9 @@ layout. The pipeline modules sit directly in `src/`, without a package.
 - `data/`: local data, gitignored
   - `raw/`: raw zone, `openf1/v1/<endpoint>/year=…/meeting_key=…/session_key=…/[driver_number=…/]data.json.gz` + `_manifest.json`
 - `docs/`: `BRIEFING.md` (the task), `api-notes.md` (API findings), `architecture.md`, `decisions/` (ADRs)
-- `scripts/`: `verify.sql` (verification queries)
+- `scripts/`: `f1.py` (command line, argparse, a thin wrapper), `verify.sql` (verification queries)
 - `sql/`: `001_meta.sql` (state tables), `002_raw.sql` (one typed table per endpoint)
 - `src/`: pipeline modules
-  - `cli.py`: command line (typer), a thin wrapper
   - `config.py`, `db.py`: settings from env, connection + DDL
   - `client.py`: httpx + rate limiter + retries; `classify.py`: response → unit status
   - `endpoints.py`: endpoint registry; `discovery.py`: race selection, live-window guard

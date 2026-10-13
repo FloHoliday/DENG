@@ -15,7 +15,6 @@ dependencies = [
     "pyrate-limiter>=4.5.0,<5.0.0",
     "python-dotenv>=1.2.4,<2.0.0",
     "tenacity>=9.2.1,<10.0.0",
-    "typer>=0.27.3,<0.28.0",
 ]
 
 [dependency-groups]
@@ -24,6 +23,6 @@ dev = [
 ]
 
 [tool.uv]
-# No package: the modules sit directly in src/ and are run as `uv run src/cli.py`
+# No package: the modules sit directly in src/ and are run as `uv run scripts/f1.py`
 # (uv_build only builds package directories, not loose modules).
 package = false

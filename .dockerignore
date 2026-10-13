@@ -1,5 +1,6 @@
 *
 !src/
+!scripts/f1.py
 !sql/
 !README.md
 !pyproject.toml

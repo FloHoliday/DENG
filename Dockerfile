@@ -29,5 +29,5 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 # Put the project's venv first on PATH so `python` resolves to it
 ENV PATH="/app/.venv/bin:$PATH"
 
-ENTRYPOINT ["python", "src/cli.py"]
+ENTRYPOINT ["python", "scripts/f1.py"]
 CMD ["run"]
