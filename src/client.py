@@ -16,10 +16,14 @@ from tenacity import (
     wait_exponential_jitter,
 )
 
-from config import Settings
-
+BASE_URL = "https://api.openf1.org/v1"
 USER_AGENT = "deng-f1-pipeline/0.1 (HSLU Data Engineering student project)"
 CLIENT_VERSION = "0.1.0"
+# Free tier allows 3/s and 30/min; 25/min leaves headroom.
+RATE_PER_SECOND = 3
+RATE_PER_MINUTE = 25
+TIMEOUT_SECONDS = 60
+MAX_ATTEMPTS = 6
 MAX_RETRY_AFTER_SECONDS = 120
 TRANSIENT_STATUS = {429, 500, 502, 503, 504}
 
@@ -29,7 +33,6 @@ log = logging.getLogger(__name__)
 @dataclass(frozen=True)
 class FetchResult:
     url: str
-    params: dict
     status_code: int | None  # None when no response arrived (timeout/connection error)
     content: bytes  # exact response body, stored unchanged in the raw zone
     data: Any  # parsed JSON, None if the body is not valid JSON
@@ -61,28 +64,20 @@ def parse_retry_after(value: str | None) -> float | None:
 
 
 class OpenF1Client:
-    def __init__(
-        self,
-        settings: Settings,
-        *,
-        limiter: Limiter | None = None,
-        sleep=time.sleep,
-    ):
+    def __init__(self):
         self._http = httpx.Client(
-            base_url=settings.openf1_base_url,
-            timeout=httpx.Timeout(settings.http_timeout_seconds, connect=5.0),
+            base_url=BASE_URL,
+            timeout=httpx.Timeout(TIMEOUT_SECONDS, connect=5.0),
             headers={"User-Agent": USER_AGENT},
             trust_env=True,
         )
         # One limiter per process, applied to every attempt: both API limits (per second and per minute) hold.
-        self._limiter = limiter or Limiter(
+        self._limiter = Limiter(
             [
-                Rate(settings.rate_limit_per_second, Duration.SECOND),
-                Rate(settings.rate_limit_per_minute, Duration.MINUTE),
+                Rate(RATE_PER_SECOND, Duration.SECOND),
+                Rate(RATE_PER_MINUTE, Duration.MINUTE),
             ]
         )
-        self._max_attempts = settings.max_retry_attempts
-        self._sleep = sleep
         self._backoff = wait_exponential_jitter(multiplier=2, max=60)
         self.requests_made = 0  # all HTTP attempts of this client, for --max-requests
 
@@ -125,10 +120,9 @@ class OpenF1Client:
             )
 
         retrying = Retrying(
-            stop=stop_after_attempt(self._max_attempts),
+            stop=stop_after_attempt(MAX_ATTEMPTS),
             wait=self._wait,
             retry=retry_if_exception_type(TransientError),
-            sleep=self._sleep,
             before_sleep=log_retry,
             reraise=True,
         )
@@ -148,7 +142,6 @@ class OpenF1Client:
             data = None
         return FetchResult(
             url=str(response.url) if response is not None else f"/{endpoint}",
-            params=params,
             status_code=response.status_code if response is not None else None,
             content=content,
             data=data,

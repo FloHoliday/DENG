@@ -8,14 +8,17 @@ from psycopg.rows import dict_row
 
 # OpenF1 serves data as "live" (paid only) from 30 min before a session until 30 min after it.
 LIVE_MARGIN = timedelta(minutes=30)
+FIRST_SEASON = 2023  # first season of free historical data
 
 
 @dataclass(frozen=True)
 class Filters:
-    years: tuple[int, ...] = ()
-    meeting_key: int | None = None
     session_key: int | None = None
     endpoints: tuple[str, ...] = ()
+
+
+def seasons(now: datetime) -> range:
+    return range(FIRST_SEASON, now.year + 1)
 
 
 def load_sessions(conn: psycopg.Connection) -> list[dict]:
@@ -30,14 +33,11 @@ def load_sessions(conn: psycopg.Connection) -> list[dict]:
         """).fetchall()
 
 
-def eligible_races(
-    sessions: list[dict], now: datetime, scope_years: tuple[int, ...], filters: Filters
-) -> list[dict]:
-    """Finished, non-cancelled Race sessions in scope, oldest first.
+def eligible_races(sessions: list[dict], now: datetime, filters: Filters) -> list[dict]:
+    """Finished, non-cancelled Race sessions since FIRST_SEASON, oldest first.
 
     Selects on session_name: the Sprint also has session_type 'Race'.
     """
-    years = filters.years or scope_years
     races = [
         s
         for s in sessions
@@ -45,8 +45,7 @@ def eligible_races(
         and not s["is_cancelled"]
         and s["date_end"] is not None
         and s["date_end"] + LIVE_MARGIN < now
-        and s["year"] in years
-        and filters.meeting_key in (None, s["meeting_key"])
+        and s["year"] >= FIRST_SEASON
         and filters.session_key in (None, s["session_key"])
     ]
     return sorted(races, key=lambda s: s["date_start"])

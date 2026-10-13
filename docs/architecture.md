@@ -12,7 +12,7 @@ flowchart LR
         copy["DELETE partition + COPY<br/>reconcile row counts"]
     end
     pg[("PostgreSQL<br/>schema raw: one typed table per endpoint")]
-    meta[("schema meta<br/>pipeline_run · extract_state · load_state")]
+    meta[("schema meta<br/>extract_state · load_state")]
 
     api --> client --> classify --> raw
     raw --> copy --> pg
@@ -26,7 +26,7 @@ flowchart LR
 
 1. **Metadata refresh.** `meetings` and `sessions` are fetched for every year in scope. They are loaded right away, because discovery and the live-window guard read `raw.sessions`.
 2. **Discovery** finds the eligible races: `session_name = 'Race'`, not cancelled, ended more than 30 min ago, in scope, matching the CLI filters. They are processed oldest first.
-3. **Planning** builds the units per race. Units already `done`/`empty` are skipped unless the race is within `SETTLING_DAYS` or `--force` is given. Units that are `failed`/`deferred`/`pending` are planned again.
+3. **Planning** builds the units per race. Units already `done`/`empty` are skipped unless the race ended within the 3-day settling window or `--force` is given. Units that are `failed`/`deferred`/`pending` are planned again.
 4. **Running.** `drivers` goes first, then the other session endpoints in registry order. After that, the `car_data` units are planned (one per driver from the stored `drivers` file) and run. Before each unit the live-window guard is checked, and so is the `--max-requests` limit.
 5. **Load.** Every partition whose units are all `done`/`empty` and whose file fingerprint changed is replaced in one transaction.
 
@@ -51,9 +51,9 @@ key is recorded in the manifest (`queried_session_key`), and
 
 | Situation | Result |
 |---|---|
-| 429, 5xx, timeout, connection error | retried with backoff (or `Retry-After`), up to `MAX_RETRY_ATTEMPTS`, then `failed` |
+| 429, 5xx, timeout, connection error | retried with backoff (or `Retry-After`), up to 6 attempts, then `failed` |
 | other 4xx (e.g. 422 "too much data") | `failed` at once, no retry |
-| empty result (`200 []` or `404 "No results found."`) | `empty`; `deferred` if the race ended within `SETTLING_DAYS` |
+| empty result (`200 []` or `404 "No results found."`) | `empty`; `deferred` if the race ended within the 3-day settling window |
 | 401/403 during a live window | `deferred`; the run stops, remaining planned units `deferred`, exit 0 |
 | 401/403 outside a live window | `failed` |
 | crash / Ctrl+C mid-run | finished units are already committed; the current file write is atomic; rerun continues |

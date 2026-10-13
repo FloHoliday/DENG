@@ -5,6 +5,7 @@ away, so a rerun after a crash, Ctrl+C or --max-requests continues where the las
 """
 
 import logging
+import uuid
 from collections import Counter
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -17,14 +18,12 @@ import ingest
 import state
 from classify import classify, record_count
 from client import CLIENT_VERSION, OpenF1Client
-from config import Settings
 from discovery import Filters
 from raw_store import RawStore
 
 DONE = ("done", "empty")
-CAR_DATA_ESTIMATE = (
-    20  # drivers per race, for --dry-run before the driver list is known
-)
+# Recent races are re-fetched on every run: OpenF1 may still publish or correct data.
+SETTLING_DAYS = 3
 
 log = logging.getLogger(__name__)
 
@@ -37,7 +36,6 @@ class Unit:
     params: dict | None  # None: nothing to query (no qualifying session for the grid)
     raw_dir: str
     session_end: datetime | None  # None: no settling window (metadata)
-    queried_session_key: int | None = None
 
     @property
     def id(self) -> tuple[str, int, str]:
@@ -46,11 +44,10 @@ class Unit:
 
 @dataclass
 class Context:
-    settings: Settings
     conn: psycopg.Connection
     store: RawStore
     client: OpenF1Client | None
-    run_id: object
+    run_id: uuid.UUID
     fixed_now: datetime | None = None  # hidden --now, to test the live-window guard
     counts: Counter = field(default_factory=Counter)
 
@@ -59,11 +56,7 @@ class Context:
 
 
 class StopRun(Exception):
-    """A planned, clean stop: the run ends with this outcome, unfinished units stay pending/deferred."""
-
-    def __init__(self, outcome: str, message: str):
-        super().__init__(message)
-        self.outcome = outcome
+    """A planned, clean stop (live window, --max-requests); unfinished units stay pending/deferred."""
 
 
 # --- planning ---------------------------------------------------------------
@@ -80,16 +73,11 @@ def units_to_run(
     ]
 
 
-def in_settling_window(race: dict, now: datetime, settling_days: int) -> bool:
-    """Recent races are re-fetched on every run: OpenF1 may still publish or correct data."""
-    return now - race["date_end"] <= timedelta(days=settling_days)
-
-
-def metadata_units(store: RawStore, years: tuple[int, ...]) -> list[Unit]:
+def metadata_units(store: RawStore, years: range) -> list[Unit]:
     return [
-        Unit(e.name, year, "all", {"year": year}, store.unit_dir(e.name, year), None)
+        Unit(name, year, "all", {"year": year}, store.unit_dir(name, year), None)
         for year in years
-        for e in endpoints.METADATA
+        for name in endpoints.METADATA
     ]
 
 
@@ -99,17 +87,15 @@ def race_units(
     """The session-level units of one race (drivers first, registry order)."""
     key, meeting = race["session_key"], race["meeting_key"]
     units = []
-    for e in endpoints.RACE_LEVEL:
-        if names and e.name not in names:
+    for name in endpoints.RACE_LEVEL:
+        if names and name not in names:
             continue
         queried = key
-        if e.kind == "grid":
+        if name == "starting_grid":
             queried = discovery.qualifying_key(sessions, meeting)
         params = {"session_key": queried} if queried is not None else None
-        raw_dir = store.unit_dir(e.name, race["year"], meeting, key)
-        units.append(
-            Unit(e.name, key, "all", params, raw_dir, race["date_end"], queried)
-        )
+        raw_dir = store.unit_dir(name, race["year"], meeting, key)
+        units.append(Unit(name, key, "all", params, raw_dir, race["date_end"]))
     return units
 
 
@@ -123,7 +109,6 @@ def car_data_units(store: RawStore, race: dict, drivers: list[dict]) -> list[Uni
             {"session_key": key, "driver_number": number},
             store.unit_dir("car_data", race["year"], meeting, key, number),
             race["date_end"],
-            key,
         )
         for number in sorted({d["driver_number"] for d in drivers})
     ]
@@ -145,7 +130,7 @@ def run_unit(ctx: Context, unit: Unit, sessions: list[dict]) -> str:
             now=now,
             session_end=unit.session_end,
             live=discovery.live_session(sessions, now) is not None,
-            settling_days=ctx.settings.settling_days,
+            settling_days=SETTLING_DAYS,
         )
         # Only usable responses go to the raw zone: a failure never overwrites a good earlier file.
         if status in DONE:
@@ -156,7 +141,7 @@ def run_unit(ctx: Context, unit: Unit, sessions: list[dict]) -> str:
                     "endpoint": unit.endpoint,
                     "url": result.url,
                     "params": unit.params,
-                    "queried_session_key": unit.queried_session_key,
+                    "queried_session_key": unit.params.get("session_key"),
                     "race_session_key": unit.key,
                     "http_status": result.status_code,
                     "record_count": record_count(result),
@@ -198,10 +183,12 @@ def run_unit(ctx: Context, unit: Unit, sessions: list[dict]) -> str:
 def execute(
     ctx: Context, units: list[Unit], sessions: list[dict], max_requests: int | None
 ) -> None:
-    """Run planned units in order; stops cleanly on --max-requests or when the API goes live."""
+    """Mark the units pending, then run them in order; stops cleanly on --max-requests or a live window."""
+    for unit in units:
+        state.set_pending(ctx.conn, *unit.id)
     for i, unit in enumerate(units):
         if max_requests is not None and ctx.client.requests_made >= max_requests:
-            raise StopRun("partial", f"--max-requests {max_requests} reached")
+            raise StopRun(f"--max-requests {max_requests} reached")
         live = discovery.live_session(sessions, ctx.now())
         if live:
             # The API is blocked until the window ends: postpone everything left in this plan.
@@ -210,12 +197,12 @@ def execute(
             )
             state.defer(ctx.conn, [u.id for u in units[i:]], reason)
             ctx.counts["deferred"] += len(units) - i
-            raise StopRun("stopped_live_window", f"API is live: {reason}")
+            raise StopRun(f"API is live: {reason}")
         run_unit(ctx, unit, sessions)
 
 
-def refresh_metadata(ctx: Context, years: tuple[int, ...]) -> list[dict]:
-    """Full refresh of meetings + sessions per year (the only requests made on every run); returns all sessions."""
+def refresh_metadata(ctx: Context) -> list[dict]:
+    """Full refresh of meetings + sessions per season (the only requests made on every run); returns all sessions."""
     sessions = discovery.load_sessions(ctx.conn)
     live = discovery.live_session(sessions, ctx.now())
     if live:
@@ -224,9 +211,7 @@ def refresh_metadata(ctx: Context, years: tuple[int, ...]) -> list[dict]:
             "API is live (session %s), metadata refresh skipped", live["session_key"]
         )
         return sessions
-    units = metadata_units(ctx.store, years)
-    for unit in units:
-        state.set_pending(ctx.conn, *unit.id)
+    units = metadata_units(ctx.store, discovery.seasons(ctx.now()))
     execute(ctx, units, sessions, None)
     for unit in units:
         ingest.load_partition(ctx.conn, ctx.store, unit.endpoint, unit.key, ctx.run_id)
@@ -234,38 +219,20 @@ def refresh_metadata(ctx: Context, years: tuple[int, ...]) -> list[dict]:
 
 
 def extract(
-    ctx: Context,
-    filters: Filters,
-    force: bool = False,
-    max_requests: int | None = None,
-    dry_run: bool = False,
-) -> list[str]:
-    """Refresh metadata, then plan and fetch every eligible race. Returns the dry-run plan lines."""
-    sessions = refresh_metadata(ctx, filters.years or ctx.settings.scope_years)
-    races = discovery.eligible_races(
-        sessions, ctx.now(), ctx.settings.scope_years, filters
-    )
+    ctx: Context, filters: Filters, force: bool = False, max_requests: int | None = None
+) -> None:
+    """Refresh metadata, then plan and fetch every eligible race, oldest first."""
+    sessions = refresh_metadata(ctx)
+    races = discovery.eligible_races(sessions, ctx.now(), filters)
     want_car_data = not filters.endpoints or "car_data" in filters.endpoints
     log.info("%d eligible races", len(races))
-    plan_lines = []
 
     for race in races:
         key = race["session_key"]
-        reset = force or in_settling_window(race, ctx.now(), ctx.settings.settling_days)
+        reset = force or ctx.now() - race["date_end"] <= timedelta(days=SETTLING_DAYS)
         statuses = state.unit_statuses(ctx.conn, key)
-        units = units_to_run(
-            race_units(ctx.store, race, sessions, filters.endpoints), statuses, reset
-        )
-
-        if dry_run:
-            plan_lines.append(
-                _dry_run_line(ctx, race, units, statuses, reset, want_car_data)
-            )
-            continue
-
-        for unit in units:
-            state.set_pending(ctx.conn, *unit.id)
-        execute(ctx, units, sessions, max_requests)
+        units = race_units(ctx.store, race, sessions, filters.endpoints)
+        execute(ctx, units_to_run(units, statuses, reset), sessions, max_requests)
 
         if want_car_data:
             # car_data is planned only once this race's driver list is known.
@@ -276,35 +243,5 @@ def extract(
             drivers = ctx.store.read_records(
                 ctx.store.unit_dir("drivers", race["year"], race["meeting_key"], key)
             )
-            units = units_to_run(
-                car_data_units(ctx.store, race, drivers), statuses, reset
-            )
-            for unit in units:
-                state.set_pending(ctx.conn, *unit.id)
-            execute(ctx, units, sessions, max_requests)
-    return plan_lines
-
-
-def _dry_run_line(ctx, race, units, statuses, reset, want_car_data) -> str:
-    car_data = "0"
-    if want_car_data:
-        if statuses.get(("drivers", "all")) == "done":
-            drivers = ctx.store.read_records(
-                ctx.store.unit_dir(
-                    "drivers", race["year"], race["meeting_key"], race["session_key"]
-                )
-            )
-            car_data = str(
-                len(
-                    units_to_run(
-                        car_data_units(ctx.store, race, drivers), statuses, reset
-                    )
-                )
-            )
-        else:
-            car_data = f"~{CAR_DATA_ESTIMATE}"
-    names = ",".join(u.endpoint for u in units) or "-"
-    return (
-        f"{race['date_start']:%Y-%m-%d} race {race['session_key']}: "
-        f"{len(units)} units ({names}), car_data {car_data}"
-    )
+            units = car_data_units(ctx.store, race, drivers)
+            execute(ctx, units_to_run(units, statuses, reset), sessions, max_requests)

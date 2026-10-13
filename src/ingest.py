@@ -12,9 +12,9 @@ from collections import Counter
 
 import psycopg
 from psycopg import sql
+from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
-import state
 from raw_store import RawStore, parse_records
 
 LINEAGE = ["_race_session_key", "_raw_path", "_sha256", "_run_id", "_extra"]
@@ -40,13 +40,6 @@ def table_columns(conn: psycopg.Connection, endpoint: str) -> list[str]:
     return [name for (name,) in rows]
 
 
-def fingerprint(units: list[dict]) -> str:
-    """Changes whenever any chunk file of the partition changes."""
-    return hashlib.sha256(
-        "\n".join(sorted(u["sha256"] for u in units)).encode()
-    ).hexdigest()
-
-
 def _extra(endpoint: str, record: dict, columns: list[str]) -> Jsonb | None:
     """Fields without a column (new or unexpected API fields); warns once per endpoint and field."""
     extra = {k: v for k, v in record.items() if k not in columns}
@@ -66,12 +59,26 @@ def load_partition(
     force: bool = False,
 ) -> int | None:
     """Load one partition; returns the row count, or None if it was skipped (not ready or unchanged)."""
-    units = state.partition_units(conn, endpoint, key)
+    with conn.cursor(row_factory=dict_row) as cur:
+        units = cur.execute(
+            """
+            SELECT status, raw_path, sha256 FROM meta.extract_state
+            WHERE endpoint = %s AND race_session_key = %s ORDER BY chunk_key
+            """,
+            (endpoint, key),
+        ).fetchall()
     if not units or any(u["status"] not in ("done", "empty") for u in units):
         log.info("skip load %s %s: not all units done/empty", endpoint, key)
         return None
-    files_fingerprint = fingerprint(units)
-    if not force and state.load_fingerprint(conn, endpoint, key) == files_fingerprint:
+    # Changes whenever any chunk file of the partition changes.
+    fingerprint = hashlib.sha256(
+        "\n".join(sorted(u["sha256"] for u in units)).encode()
+    ).hexdigest()
+    loaded = conn.execute(
+        "SELECT files_fingerprint FROM meta.load_state WHERE endpoint = %s AND race_session_key = %s",
+        (endpoint, key),
+    ).fetchone()
+    if not force and loaded and loaded[0] == fingerprint:
         log.info("skip load %s %s: unchanged", endpoint, key)
         return None
 
@@ -112,7 +119,16 @@ def load_partition(
             raise ReconciliationError(
                 f"{endpoint} {key}: inserted {inserted} rows, manifests say {expected}"
             )
-        state.save_load(conn, endpoint, key, files_fingerprint, inserted, run_id)
+        cur.execute(
+            """
+            INSERT INTO meta.load_state (endpoint, race_session_key, files_fingerprint, row_count, run_id)
+            VALUES (%s, %s, %s, %s, %s)
+            ON CONFLICT (endpoint, race_session_key) DO UPDATE SET
+              files_fingerprint = EXCLUDED.files_fingerprint, row_count = EXCLUDED.row_count,
+              run_id = EXCLUDED.run_id, loaded_at = now()
+            """,
+            (endpoint, key, fingerprint, inserted, run_id),
+        )
     log.info(
         "loaded %s %s: %d rows in %d ms",
         endpoint,
@@ -127,14 +143,17 @@ def load(
     conn: psycopg.Connection,
     store: RawStore,
     run_id: uuid.UUID,
-    keys: list[int] | None = None,
+    session_key: int | None = None,
     names: tuple[str, ...] = (),
     force: bool = False,
 ) -> Counter:
-    """Load every extracted partition (optionally only some keys/endpoints); one failure doesn't stop the rest."""
+    """Load every extracted partition (optionally one race / some endpoints); one failure doesn't stop the rest."""
     counts = Counter()
-    for endpoint, key in state.partitions(conn):
-        if (keys is not None and key not in keys) or (names and endpoint not in names):
+    partitions = conn.execute(
+        "SELECT DISTINCT endpoint, race_session_key FROM meta.extract_state ORDER BY 2, 1"
+    ).fetchall()
+    for endpoint, key in partitions:
+        if session_key not in (None, key) or (names and endpoint not in names):
             continue
         try:
             rows = load_partition(conn, store, endpoint, key, run_id, force)

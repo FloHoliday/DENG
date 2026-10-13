@@ -12,7 +12,8 @@ in the oral defence.
 - (A) Fully hand-written: a sleep-based limiter and a retry loop (our first version). Easy to get subtly wrong (two limits, `Retry-After`), harder to test.
 - (C) A framework such as dlt. It hides state, retries and schema handling. We tried it and dropped it as too opaque: we could not explain or control the state model.
 
-**Consequences.** About 1,450 lines in `src/` (docstrings included), in 12
+**Consequences.** About 1,150 lines in `src/` (docstrings included), in 11
 modules with one job each.
-Library behaviour is pinned by `uv.lock` and covered by unit tests (respx,
-injected sleep and limiter).
+Library behaviour is pinned by `uv.lock`. There is no automated test suite
+(we decided to drop it); `scripts/verify.sql` and the review race run are the
+checks.

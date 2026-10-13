@@ -1,16 +1,6 @@
--- Pipeline state: one row per run, per extract unit and per load partition.
+-- Pipeline state: one row per extract unit and per load partition.
 -- Convention for the metadata endpoints (meetings, sessions): race_session_key holds the year.
 CREATE SCHEMA IF NOT EXISTS meta;
-
-CREATE TABLE IF NOT EXISTS meta.pipeline_run (
-  run_id        uuid PRIMARY KEY,
-  command       text NOT NULL,
-  params        jsonb NOT NULL,
-  started_at    timestamptz NOT NULL DEFAULT now(),
-  ended_at      timestamptz,
-  outcome       text,              -- success | partial | failed | stopped | stopped_live_window
-  counts        jsonb              -- per status
-);
 
 CREATE TABLE IF NOT EXISTS meta.extract_state (
   endpoint          text NOT NULL,

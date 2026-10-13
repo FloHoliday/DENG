@@ -67,7 +67,6 @@ Two decoupled stages, both started by hand through one CLI (`src/cli.py`):
    costs zero API calls, and an API outage can never corrupt the database.
 
 Pipeline state lives in schema `meta`:
-- `pipeline_run`: one row per command.
 - `extract_state`: one row per extract unit `(endpoint, race_session_key, chunk_key)`, with status `pending | done | empty | deferred | failed`.
 - `load_state`: one row per load partition `(endpoint, race_session_key)`, with a fingerprint of its files.
 
@@ -77,7 +76,7 @@ in [docs/decisions/](docs/decisions/).
 
 **Failsafe and idempotent:**
 - Every unit's status is committed as soon as it finishes, so a rerun continues where the last run stopped (crash, Ctrl+C, `--max-requests`).
-- Units already `done`/`empty` are not fetched again, unless the race ended less than `SETTLING_DAYS` ago or `--force` is given.
+- Units already `done`/`empty` are not fetched again, unless the race ended less than 3 days ago (settling window) or `--force` is given.
 - Files are written atomically (temp file + rename, data before manifest).
 - A load replaces a whole partition in one transaction (DELETE + COPY). It checks that the row count matches the manifests and rolls back otherwise. A partition whose files have not changed is skipped.
 - During a live window, the remaining units become `deferred` and the run stops with exit code 0. An empty response within the settling window is also `deferred`.
@@ -102,37 +101,36 @@ no package, so there is no `f1` executable. Inside Docker it runs as
 | Command | What it does |
 |---|---|
 | `init-db` | apply `sql/*.sql` (idempotent) |
-| `extract [filters] [--force] [--max-requests N] [--dry-run]` | refresh metadata, then fetch all planned units into the raw zone |
-| `load [filters] [--force]` | load completed partitions into `raw.*` (no API calls) |
-| `run [filters] [--force] [--max-requests N]` | extract + load |
-| `status [filters]` | units per endpoint × status, failed/deferred units with their last error |
+| `extract [--session-key S] [--endpoint E]… [--force] [--max-requests N]` | refresh metadata, then fetch all planned units into the raw zone |
+| `load [--session-key S] [--endpoint E]… [--force]` | load completed partitions into `raw.*` (no API calls) |
+| `run [--session-key S] [--endpoint E]… [--force] [--max-requests N]` | extract + load |
 
-Filters: `--year 2025` (repeatable), `--meeting-key 1276`,
-`--session-key 9839`, `--endpoint laps` (repeatable), `--profile review`
-(only `REVIEW_SESSION_KEY`, the Abu Dhabi 2025 race). The hidden option
-`--now 2026-10-11T12:30:00Z` pretends a different time, to test the
-live-window guard.
+Without `--session-key`, every finished race since 2023 is processed. The
+hidden option `--now 2026-10-11T12:30:00Z` pretends a different time, to test
+the live-window guard. Exit codes: `0` success (deferred units allowed), `1`
+failed units or an unexpected error, `2` config or database connection error,
+`130` interrupted.
 
-- `--dry-run` prints the planned units per race and makes no data requests. The metadata refresh still runs.
-- Exit codes: `0` success (deferred units allowed), `1` failed units or an unexpected error, `2` config or database connection error, `130` interrupted.
+The fixed tuning values sit as constants at the top of the modules that use them:
+- in `src/client.py`: rate limit 3/s and 25/min, timeout 60 s, 6 attempts
+- in `src/fetch.py`: settling window 3 days
 
-### Review profile (for peer reviewers)
+### Review race (for peer reviewers)
 
 ```bash
-uv run src/cli.py run --profile review     # ~38 requests, ~1.5 min
-uv run src/cli.py status --profile review
+uv run src/cli.py run --session-key 9839   # Abu Dhabi 2025: ~38 requests, ~1.5 min
 docker compose exec -T postgres sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB"' < scripts/verify.sql
-uv run src/cli.py run --profile review     # again: only the 8 metadata requests, nothing reloaded
+uv run src/cli.py run --session-key 9839   # again: only the 8 metadata requests, nothing reloaded
 ```
 
 ### Live-window guard demo
 
-`--force` makes the already completed review units get planned again:
+`--force` makes the already completed units get planned again:
 
 ```bash
-uv run src/cli.py extract --profile review --force --now 2026-10-10T14:00:00Z
+uv run src/cli.py extract --session-key 9839 --force --now 2026-10-10T14:00:00Z
 # → "API is live: live window of session 11384 (Qualifying)", 10 units deferred, exit 0
-uv run src/cli.py extract --profile review   # picks the deferred units up again
+uv run src/cli.py extract --session-key 9839   # picks the deferred units up again
 ```
 
 ## 6. Verification
@@ -140,16 +138,10 @@ uv run src/cli.py extract --profile review   # picks the deferred units up again
 [scripts/verify.sql](scripts/verify.sql) shows:
 - row counts per table for the review race
 - reconciliation of `meta.load_state` against the tables
-- extract units by status, and the failed/deferred units
+- extract units by status, and the failed/deferred units with their last error
 - sanity checks: drivers per race, grid coverage, `car_data` value ranges, duplicate laps
 
-Tests:
-
-```bash
-uv run pytest -m "not db"   # unit tests, no network, no database
-uv run pytest -m db         # integration tests against the compose Postgres (uses a throwaway f1_test database)
-uv run ruff check . && uv run ruff format --check .
-```
+Lint: `uv run ruff check . && uv run ruff format --check .`
 
 ## 7. Expected runtimes and volumes
 
@@ -161,7 +153,7 @@ uv run ruff check . && uv run ruff format --check .
 ## 8. Project plan / backlog
 
 - [x] Ingest script for one race weekend, local PostgreSQL + Docker Compose
-- [x] Stateful extract/load pipeline with raw zone, state tables and tests
+- [x] Stateful extract/load pipeline with raw zone and state tables
 - [ ] Lap-level aggregation of `car_data`
 - [ ] First justified transformation (lap-grain fact table with tyre/weather/safety-car enrichment)
 - [ ] Orchestrator calling the same functions (`refresh_metadata`, `extract`, `ingest.load`)
@@ -175,7 +167,7 @@ layout. The pipeline modules sit directly in `src/`, without a package.
 - `README.md`: this file
 - `pyproject.toml`, `uv.lock`: project metadata and pinned dependencies (uv)
 - `Dockerfile`, `docker-compose.yml`: pipeline image, local PostgreSQL, pgAdmin
-- `.env.example`: all configuration keys, copy to `.env`
+- `.env.example`: Postgres connection and raw zone location, copy to `.env`
 - `data/`: local data, gitignored
   - `raw/`: raw zone, `openf1/v1/<endpoint>/year=…/meeting_key=…/session_key=…/[driver_number=…/]data.json.gz` + `_manifest.json`
 - `docs/`: `BRIEFING.md` (the task), `api-notes.md` (API findings), `architecture.md`, `decisions/` (ADRs)
@@ -183,19 +175,18 @@ layout. The pipeline modules sit directly in `src/`, without a package.
 - `sql/`: `001_meta.sql` (state tables), `002_raw.sql` (one typed table per endpoint)
 - `src/`: pipeline modules
   - `cli.py`: command line (typer), a thin wrapper
-  - `config.py`, `logging_setup.py`, `db.py`: settings from env, logging, connection + DDL
+  - `config.py`, `db.py`: settings from env, connection + DDL
   - `client.py`: httpx + rate limiter + retries; `classify.py`: response → unit status
   - `endpoints.py`: endpoint registry; `discovery.py`: race selection, live-window guard
   - `raw_store.py`: raw zone paths, atomic writes, manifests
-  - `state.py`: access to the `meta` tables
+  - `state.py`: access to `meta.extract_state`
   - `fetch.py`: extract (planner + runner); `ingest.py`: load
-- `tests/`: `unit/` (no network, no DB), `integration/` (marker `db`)
 
 ## 10. Known limitations
 
 - No data can be fetched during live windows (30 min before to 30 min after any session). Runs then stop and defer the remaining work.
 - A full backfill takes ~2 h because of the 30 requests/minute limit. Extraction is sequential on purpose (ADR 0005).
-- OpenF1 is unofficial and partly undocumented, with no SLA. We verified the empty-result format (404 "No results found.") and the grid key ourselves. The blackout status (401 vs. 403) and `Retry-After` on 429 are unverified, see [docs/api-notes.md](docs/api-notes.md).
+- OpenF1 is unofficial and partly undocumented, with no SLA. We verified the empty-result format (404 "No results found.") and the grid key ourselves. The upstream source shows that 429s carry no `Retry-After` (slowapi default), so retries rely on backoff. The blackout status (401 vs. 403) is still unverified, see [docs/api-notes.md](docs/api-notes.md).
 - The starting grid can omit pit-lane starters.
 - `car_data.throttle` contains the value 104, outside the documented 0–100 range.
 - `drivers.country_code` and `pit.pit_duration` are deprecated and will disappear after 2026. The columns stay nullable. New fields land in `_extra`.

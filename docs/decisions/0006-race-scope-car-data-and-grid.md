@@ -16,5 +16,5 @@ and `starting_grid` behave (see `docs/api-notes.md`).
 
 **Consequences.**
 - ~30 requests per race (plus 8 for the metadata refresh).
-- If OpenF1 starts keying grids on the race session, the grid unit goes `failed`/`empty`, and that shows up in `status`.
+- If OpenF1 starts keying grids on the race session, the grid unit goes `failed`/`empty`, and that shows up in `scripts/verify.sql`.
 - Pit-lane starters can be missing from the grid (a known gap).
