@@ -1,0 +1,71 @@
+# Kestra flow: ingest + store all race weekends since a date (scripts/ingest.py).
+# Rerun-safe because the script is idempotent: complete sessions (_SUCCESS) are skipped,
+# and each session is replaced in Postgres in one transaction.
+id: f1_race_weekend
+namespace: deng.f1
+
+description: |
+  Weekly incremental load: every Monday, ingest all race weekends that started in the
+  last 8 days. Manual run: set `since` (e.g. 2023-01-01 for the full historical backfill).
+  Backfill: Triggers tab → monday_after_race_weekend → Backfill executions.
+
+inputs:
+  - id: since
+    type: DATE
+    defaults: "2026-01-01"
+    description: Manual runs only. Ingest race weekends starting on/after this date.
+  - id: force
+    type: BOOL
+    defaults: false
+    description: Re-fetch files that already exist.
+
+variables:
+  # Scheduled/backfill run: look back 8 days from the scheduled date. Manual run: the input.
+  since: >-
+    {{ trigger.date is defined
+       ? (trigger.date | dateAdd(-8, 'DAYS') | date('yyyy-MM-dd'))
+       : inputs.since }}
+
+# One run at a time: a scheduled run and a manual backfill never write the same files.
+concurrency:
+  limit: 1
+  behavior: QUEUE
+
+triggers:
+  - id: monday_after_race_weekend
+    type: io.kestra.plugin.core.trigger.Schedule
+    # Monday 06:00 Zurich time: no F1 session is live then (OpenF1 returns HTTP 401
+    # for everything during live sessions).
+    cron: "0 6 * * 1"
+    timezone: Europe/Zurich
+
+tasks:
+  - id: ingest_and_store
+    type: io.kestra.plugin.scripts.shell.Commands
+    containerImage: deng-f1-code:local
+    taskRunner:
+      type: io.kestra.plugin.scripts.runner.docker.Docker
+      pullPolicy: NEVER  # built locally with `docker compose build code`
+      networkMode: deng_default
+      volumes:
+        - "{{ envs.host_data_dir }}:/app/data"
+    env:
+      POSTGRES_HOST: postgres
+      POSTGRES_DB: "{{ envs.postgres_db }}"
+      POSTGRES_USER: "{{ envs.postgres_user }}"
+      POSTGRES_PASSWORD: "{{ envs.postgres_password }}"
+    # Task-level retry on top of the script's per-request retries: covers the API being
+    # down for a while. Safe because a rerun only fetches and loads what is missing.
+    retry:
+      type: exponential
+      interval: PT5M
+      maxInterval: PT1H
+      maxAttempts: 4
+    commands:
+      - cd /app
+      - >-
+        python scripts/ingest.py
+        --since {{ render(vars.since) }}
+        {{ inputs.force ? '--force' : '' }}
+
+  # - id: transform  # TODO: refresh staging/core/marts once the transform layer exists
