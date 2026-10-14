@@ -41,7 +41,7 @@ CREATE TABLE IF NOT EXISTS public.sessions (
     loaded_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
--- One table per endpoint, keyed by the Race/Sprint session_key the rows were fetched for.
+-- One table per endpoint, keyed by the Race session_key the rows were fetched for.
 CREATE TABLE IF NOT EXISTS public.drivers (
     broadcast_name TEXT,
     country_code TEXT, -- deprecated, will be removed at the end of the 2026 season
@@ -166,7 +166,7 @@ CREATE TABLE IF NOT EXISTS public.intervals (
     loaded_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
--- session_key is the qualifying session that set the grid, race_session_key the Race/Sprint.
+-- session_key is the qualifying session that set the grid, race_session_key the Race.
 CREATE TABLE IF NOT EXISTS public.starting_grid (
     driver_number INTEGER NOT NULL,
     lap_duration DOUBLE PRECISION,

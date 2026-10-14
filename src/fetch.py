@@ -16,7 +16,6 @@ TIMEOUT = 60
 # Errors that mark a single fetch as failed without aborting the whole run.
 FETCH_ERRORS = (requests.RequestException, RuntimeError)
 
-SESSION_NAMES = {"Race", "Sprint"}
 SESSION_ENDPOINTS = [
     "drivers",
     "laps",
@@ -28,12 +27,6 @@ SESSION_ENDPOINTS = [
     "weather",
     "intervals",
 ]
-TELEMETRY_SESSION = "Race"
-# OpenF1 stores the starting grid under the qualifying session that set it.
-GRID_SESSION_NAMES = {
-    "Race": ("Qualifying",),
-    "Sprint": ("Sprint Qualifying", "Sprint Shootout"),
-}
 
 
 class OpenF1Client:
@@ -167,10 +160,7 @@ def fetch_session(
     try:
         grid_sessions = client.get(
             "sessions",
-            {
-                "meeting_key": session["meeting_key"],
-                "session_name": GRID_SESSION_NAMES[session["session_name"]],
-            },
+            {"meeting_key": session["meeting_key"], "session_name": "Qualifying"},
         )
         if not grid_sessions:
             print("FAILED starting_grid: no qualifying session found", file=sys.stderr)
@@ -187,16 +177,15 @@ def fetch_session(
         print(f"FAILED starting_grid: {exc}", file=sys.stderr)
         failed = True
 
-    if session["session_name"] == TELEMETRY_SESSION:
-        if "drivers" in counts:
-            try:
-                counts |= fetch_car_data(client, session_dir, session_key, force)
-            except FETCH_ERRORS as exc:
-                print(f"FAILED car_data: {exc}", file=sys.stderr)
-                failed = True
-        else:
-            print("FAILED car_data: drivers list unavailable", file=sys.stderr)
+    if "drivers" in counts:
+        try:
+            counts |= fetch_car_data(client, session_dir, session_key, force)
+        except FETCH_ERRORS as exc:
+            print(f"FAILED car_data: {exc}", file=sys.stderr)
             failed = True
+    else:
+        print("FAILED car_data: drivers list unavailable", file=sys.stderr)
+        failed = True
 
     if failed:
         print(f"Session {session_key} incomplete, no _SUCCESS written", file=sys.stderr)
@@ -218,11 +207,11 @@ def fetch_meeting(
     try:
         sessions = client.get(
             "sessions",
-            {"meeting_key": meeting["meeting_key"], "session_name": SESSION_NAMES},
+            {"meeting_key": meeting["meeting_key"], "session_name": "Race"},
         )
     except FETCH_ERRORS as exc:
         print(f"FAILED meeting {meeting['meeting_key']}: {exc}", file=sys.stderr)
-        return [False] * len(SESSION_NAMES)
+        return [False]
 
     meeting_dir = (
         raw_dir

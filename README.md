@@ -35,11 +35,10 @@ age + conditions).
 - **Access method:** HTTP GET, JSON or CSV (`csv=true`), no authentication
   required for historical data (2023 season onward). Filterable by session,
   driver, and other attributes via query parameters. **Exception:** while any live F1 session (practice, qualifying,
-  sprint or
-  race) is in progress, access to **everything** is denied without a paid API
+  sprint or race) is in progress, access to **everything** is denied without a paid API
   key - including all historical data (HTTP 401 "Live F1 session in
   progress"). Free access returns once the session has ended.
-- **Sessions used:** only the **Race** and **Sprint** sessions of a race
+- **Sessions used:** only the **Race** session of a race
   weekend. Practice and qualifying laps are not used (the qualifying result
   only enters through `starting_grid`).
 - **Endpoints used:**
@@ -54,7 +53,7 @@ age + conditions).
     - `weather` - ~1 row/minute, track/air temperature, rainfall (degradation)
     - `session_result`, `starting_grid` - final classification vs. grid
       position. OpenF1 keys the grid on the *qualifying* session, so it is
-      fetched from there and stored next to the Race/Sprint it belongs to.
+      fetched from there and stored next to the Race it belongs to.
     - `car_data` - high-frequency telemetry (~3.7 Hz per car), **Race session
       only**, fetched per driver and aggregated to lap grain during
       transformation
@@ -92,7 +91,7 @@ loading the files into the database is the
 [store step](#3-initial-ingestion-and-storage-strategy).
 
 - **Script:** `scripts/ingest.py` runs both steps from `src/`:
-  `fetch.py` downloads the Race and Sprint sessions of all finished,
+  `fetch.py` downloads the Race session of all finished,
   non-cancelled race weekends since a given date into `data/raw`, one JSON
   file per endpoint/session, then `ingest.py` loads them into PostgreSQL
   (see [Storing](#storing)).
@@ -147,7 +146,7 @@ a value of the wrong type fails the session's load.
   mismatch or error the whole session is rolled back, and its earlier rows
   stay. `meetings` and `sessions` are upserted on their key, so re-runs
   never create duplicates.
-- **Starting grid:** `starting_grid.race_session_key` is the Race/Sprint the
+- **Starting grid:** `starting_grid.race_session_key` is the Race the
   grid belongs to; `session_key` is the *qualifying* session that set it.
 
 ## 3. Initial ingestion and storage strategy
@@ -190,7 +189,7 @@ destination changes.
 
 ```mermaid
 flowchart LR
-    source["Source<br/>OpenF1 REST API<br/>Race + Sprint sessions<br/>JSON per endpoint"]
+    source["Source<br/>OpenF1 REST API<br/>Race sessions<br/>JSON per endpoint"]
 
     subgraph orchestrator["Orchestrator: one run per race weekend, retries, backfills"]
         ingest["Ingest<br/>Python batch job<br/>src/fetch.py<br/>full backfill 2023–2025<br/>+ incremental 2026"]
