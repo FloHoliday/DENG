@@ -7,6 +7,7 @@ from datetime import datetime
 from pathlib import Path
 
 from sqlalchemy import URL, create_engine, text
+from upath import UPath
 
 from fetch import SESSION_ENDPOINTS
 
@@ -31,11 +32,11 @@ def create_engine_from_env():
     )
 
 
-def read_json(path: Path):
+def read_json(path: UPath):
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-def table_files(session_dir: Path, table: str) -> list[Path]:
+def table_files(session_dir: UPath, table: str) -> list[UPath]:
     if table == "car_data":
         return sorted(session_dir.glob("car_data/*.json"))
     return [session_dir / f"{table}.json"]
@@ -59,7 +60,7 @@ def insert(connection, table: str, rows: list[dict], conflict_key: str | None = 
     connection.execute(text(sql), [{c: row.get(c) for c in columns} for row in rows])
 
 
-def load_session(session_dir: Path, engine) -> int:
+def load_session(session_dir: UPath, engine) -> int:
     """Replace one session's rows in one transaction; returns the number of rows loaded."""
     success = read_json(session_dir / "_SUCCESS")
     session_key = int(session_dir.name.split("_")[0])
@@ -115,7 +116,7 @@ def load_session(session_dir: Path, engine) -> int:
     return loaded
 
 
-def run(raw_dir: Path = Path("data/raw")) -> int:
+def run(raw_dir: UPath) -> int:
     """Load every session whose _SUCCESS marker is newer than its last load; returns the number loaded."""
     engine = create_engine_from_env()
     try:

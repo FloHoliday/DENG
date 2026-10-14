@@ -35,7 +35,6 @@ services:
       POSTGRES_DB: ${POSTGRES_DB:?Set POSTGRES_DB in .env}
       POSTGRES_USER: ${POSTGRES_USER:?Set POSTGRES_USER in .env}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
-      OPENF1_ACCESS_TOKEN: ${OPENF1_ACCESS_TOKEN:-}
     volumes:
       - ./data:/app/data
     depends_on:

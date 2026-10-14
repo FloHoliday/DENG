@@ -5,16 +5,18 @@ import re
 import sys
 import time
 from datetime import UTC, date, datetime
-from pathlib import Path
 
-import requests
+import httpx
+from pyrate_limiter import Duration, Limiter, Rate
+from pyrate_limiter.extras.httpx_limiter import RateLimiterTransport
+from tenacity import retry, retry_if_exception, stop_after_attempt, wait_exponential
+from upath import UPath
 
 BASE_URL = "https://api.openf1.org/v1"
-MIN_REQUEST_INTERVAL = 0.5  # API limit: up to 3 requests/second & 30 requests/minute
-MAX_ATTEMPTS = 5
-TIMEOUT = 60
+# API limit: up to 3 requests/second & 30 requests/minute
+RATE_LIMITS = [Rate(3, Duration.SECOND), Rate(30, Duration.MINUTE)]
 # Errors that mark a single fetch as failed without aborting the whole run.
-FETCH_ERRORS = (requests.RequestException, RuntimeError)
+FETCH_ERRORS = (httpx.HTTPError,)
 
 SESSION_ENDPOINTS = [
     "drivers",
@@ -29,56 +31,60 @@ SESSION_ENDPOINTS = [
 ]
 
 
+def is_retryable(exc: BaseException) -> bool:
+    """Timeouts, connection errors, 422 (OpenF1 overloaded), 429 and 5xx are worth retrying."""
+    if isinstance(exc, httpx.HTTPStatusError):
+        status = exc.response.status_code
+        return status in (422, 429) or status >= 500
+    return isinstance(exc, httpx.TransportError)
+
+
+def log_retry(state) -> None:
+    exc = state.outcome.exception()
+    error = (
+        f"HTTP {exc.response.status_code}"
+        if isinstance(exc, httpx.HTTPStatusError)
+        else repr(exc)
+    )
+    _, endpoint, params = state.args
+    print(
+        f"{endpoint} {params}: {error}, retrying in {state.next_action.sleep:.0f}s",
+        file=sys.stderr,
+    )
+
+
 class OpenF1Client:
-    def __init__(self, access_token: str | None = None) -> None:
-        self._http = requests.Session()
-        if access_token:
-            self._http.headers["Authorization"] = f"Bearer {access_token}"
-        self._last_request = 0.0
+    def __init__(self) -> None:
+        self._http = httpx.Client(
+            base_url=BASE_URL,
+            timeout=60,
+            transport=RateLimiterTransport(limiter=Limiter(RATE_LIMITS)),
+        )
 
+    @retry(
+        retry=retry_if_exception(is_retryable),
+        stop=stop_after_attempt(5),
+        wait=wait_exponential(multiplier=2),
+        before_sleep=log_retry,
+        reraise=True,
+    )
     def get(self, endpoint: str, params: dict) -> list[dict]:
-        url = f"{BASE_URL}/{endpoint}"
-        for attempt in range(1, MAX_ATTEMPTS + 1):
-            wait = self._last_request + MIN_REQUEST_INTERVAL - time.monotonic()
-            if wait > 0:
-                time.sleep(wait)
-            self._last_request = time.monotonic()
-
-            try:
-                resp = self._http.get(url, params=params, timeout=TIMEOUT)
-            except (requests.ConnectionError, requests.Timeout) as exc:
-                error = str(exc)
-            else:
-                if resp.status_code == 404:
-                    return []
-                if resp.status_code == 401:
-                    # During live F1 sessions the whole API requires an API key.
-                    sys.exit(
-                        f"OpenF1 access denied: {resp.json().get('detail', resp.text)}"
-                    )
-                if resp.status_code in (422, 429) or resp.status_code >= 500:
-                    error = f"HTTP {resp.status_code}"
-                else:
-                    resp.raise_for_status()
-                    return resp.json()
-
-            if attempt == MAX_ATTEMPTS:
-                raise RuntimeError(
-                    f"{endpoint} {params}: {error} after {attempt} attempts"
-                )
-            backoff = 2**attempt
-            print(
-                f"{endpoint} {params}: {error}, retrying in {backoff}s", file=sys.stderr
-            )
-            time.sleep(backoff)
-        raise AssertionError("unreachable")
+        resp = self._http.get(endpoint, params=params)
+        if resp.status_code == 404:
+            return []
+        if resp.status_code == 401:
+            # During live F1 sessions the whole API requires an API key.
+            sys.exit(f"OpenF1 access denied: {resp.json().get('detail', resp.text)}")
+        resp.raise_for_status()
+        return resp.json()
 
 
 def find_meetings(client: OpenF1Client, since: date) -> list[dict]:
     """Non-cancelled meetings starting on or after `since`."""
     today = datetime.now(UTC).date()
     return client.get(
-        "meetings", {"date_start>": since, "date_end<": today, "is_cancelled": False}
+        "meetings",
+        {"date_start>": str(since), "date_end<": str(today), "is_cancelled": False},
     )
 
 
@@ -86,15 +92,13 @@ def slug(text: str) -> str:
     return re.sub(r"[^a-z0-9]+", "_", text.lower()).strip("_")
 
 
-def write_json(path: Path, data: list | dict) -> None:
+def write_json(path: UPath, data: list | dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(".tmp")
-    tmp.write_text(json.dumps(data), encoding="utf-8")
-    tmp.replace(path)
+    path.write_text(json.dumps(data), encoding="utf-8")
 
 
 def fetch_to_file(
-    client: OpenF1Client, path: Path, force: bool, endpoint: str, **params
+    client: OpenF1Client, path: UPath, force: bool, endpoint: str, **params
 ) -> int:
     """Fetch one endpoint into `path` and return its row count."""
     if path.exists() and not force:
@@ -111,7 +115,7 @@ def fetch_to_file(
 
 
 def fetch_car_data(
-    client: OpenF1Client, session_dir: Path, session_key: int, force: bool
+    client: OpenF1Client, session_dir: UPath, session_key: int, force: bool
 ) -> dict[str, int]:
     drivers = json.loads((session_dir / "drivers.json").read_text(encoding="utf-8"))
     counts = {}
@@ -131,7 +135,7 @@ def fetch_car_data(
 def fetch_session(
     client: OpenF1Client,
     session: dict,
-    meeting_dir: Path,
+    meeting_dir: UPath,
     force: bool,
 ) -> bool:
     session_key = session["session_key"]
@@ -200,7 +204,7 @@ def fetch_session(
 def fetch_meeting(
     client: OpenF1Client,
     meeting: dict,
-    raw_dir: Path,
+    raw_dir: UPath,
     force: bool,
 ) -> list[bool]:
     """Fetch the meeting metadata and the `selected` sessions; one result per session."""
@@ -229,12 +233,11 @@ def fetch_meeting(
 
 def run(
     since: date,
-    raw_dir: Path = Path("data/raw"),
-    access_token: str | None = None,
+    raw_dir: UPath,
     force: bool = False,
 ) -> int:
     """Fetch all race weekends since `since` into `raw_dir`; returns the number of failed sessions."""
-    client = OpenF1Client(access_token)
+    client = OpenF1Client()
 
     meetings = find_meetings(client, since)
     if not meetings:

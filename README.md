@@ -95,8 +95,9 @@ loading the files into the database is the
   non-cancelled race weekends since a given date into `data/raw`, one JSON
   file per endpoint/session, then `ingest.py` loads them into PostgreSQL
   (see [Storing](#storing)).
-- **Failure behaviour:** requests are throttled and retried with
-  exponential backoff (429, 5xx, timeouts). A session folder gets a
+- **Failure behaviour:** requests are throttled to 3/second and 30/minute
+  (`pyrate-limiter`) and retried with exponential backoff on 422, 429, 5xx
+  and timeouts (`tenacity`). A session folder gets a
   `_SUCCESS` marker (timestamp + row counts) only after all its endpoints
   were downloaded, the script exits non-zero otherwise. Already-downloaded
   files are skipped on re-run, so a failed ingestion is resumed simply by running
@@ -112,7 +113,7 @@ docker compose run --rm code scripts/ingest.py --since 2025-01-01
 | Flag               | Meaning                                                      |
 |--------------------|--------------------------------------------------------------|
 | `--since`          | required: race weekends starting on or after this date (ISO) |
-| `--raw-dir`        | raw file directory (default `data/raw`)                      |
+| `--raw-dir`        | raw file directory or `gs://bucket/path` (default `data/raw`)|
 | `--force`          | re-fetch files that already exist                            |
 
 Race weekends are found via
@@ -135,8 +136,6 @@ a value of the wrong type fails the session's load.
 
 - **Credentials:** `POSTGRES_HOST` (default `localhost`), `POSTGRES_PORT`
   (default `5432`), `POSTGRES_DB`, `POSTGRES_USER`, `POSTGRES_PASSWORD`.
-  An optional `OPENF1_ACCESS_TOKEN` (paid OpenF1 key) is sent as a bearer
-  token, which allows ingestion during live sessions.
 - **Incremental:** `loaded_sessions` records the `_SUCCESS` marker each
   session was loaded from. Only sessions with a new marker are loaded:
   newly completed ones, or ones re-fetched with `--force`. Deleting a row
