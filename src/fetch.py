@@ -16,7 +16,7 @@ BASE_URL = "https://api.openf1.org/v1"
 # API limit: up to 3 requests/second & 30 requests/minute
 RATE_LIMITS = [Rate(3, Duration.SECOND), Rate(30, Duration.MINUTE)]
 # Errors that mark a single fetch as failed without aborting the whole run.
-FETCH_ERRORS = (httpx.HTTPError,)
+FETCH_ERRORS = (httpx.HTTPError, ValueError)
 
 SESSION_ENDPOINTS = [
     "drivers",
@@ -107,6 +107,8 @@ def fetch_to_file(
         return rows
     start = time.monotonic()
     data = client.get(endpoint, params)
+    if not data:
+        raise ValueError(f"{endpoint}: no data for {params}")
     write_json(path, data)
     print(
         f"fetch {path.name:<40} {len(data):6d} rows in {time.monotonic() - start:.1f}s"
