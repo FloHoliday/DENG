@@ -9,7 +9,12 @@ authors = [
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
-    "requests>=2.34.2,<3.0.0",
+    "httpx>=0.28.1,<0.29.0",
+    "psycopg[binary]>=3.2,<4",
+    "pyrate-limiter>=4.5,<5",
+    "sqlalchemy>=2.0,<2.1",
+    "tenacity>=9.2.1,<10.0.0",
+    "universal-pathlib>=0.3.10,<0.4.0",
 ]
 
 [dependency-groups]
