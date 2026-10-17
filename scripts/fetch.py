@@ -1,4 +1,4 @@
-"""Ingest + store: fetch the OpenF1 data of all race weekends since a date into raw JSON files, then load them into PostgreSQL."""
+"""Step 2, fetch: download the raw OpenF1 data of all race weekends since a date into JSON files (data/raw)."""
 
 import argparse
 import sys
@@ -10,7 +10,6 @@ sys.path.insert(0, str(Path(__file__).parents[1] / "src"))
 from upath import UPath
 
 import fetch
-import ingest
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
@@ -18,7 +17,7 @@ if __name__ == "__main__":
         "--since",
         type=date.fromisoformat,
         required=True,
-        help="ingest all race weekends starting on or after this date, e.g. 2025-01-01",
+        help="race weekends starting on or after this date, e.g. 2023-01-01",
     )
     parser.add_argument(
         "--raw-dir",
@@ -32,7 +31,6 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     failed = fetch.run(args.since, args.raw_dir, force=args.force)
-    # Complete sessions are loaded even if others failed, those follow on the next run.
-    ingest.run(args.raw_dir)
+    # Fail fast: nothing is loaded until every session is complete; a re-run resumes.
     if failed:
         sys.exit(f"{failed} sessions failed, re-run to resume")

@@ -1,4 +1,4 @@
-"""Store step: load the raw JSON of every completed session in data/raw into typed PostgreSQL tables."""
+"""Load step: load the raw JSON of every completed session in data/raw into typed PostgreSQL tables."""
 
 import json
 import os

@@ -88,13 +88,27 @@ def find_meetings(client: OpenF1Client, since: date) -> list[dict]:
     )
 
 
+def check_source(since: date) -> int:
+    """Check that OpenF1 answers (no live-session lock) and list the race weekends to fetch."""
+    meetings = find_meetings(OpenF1Client(), since)
+    for meeting in meetings:
+        print(
+            f"{meeting['date_start'][:10]}  {meeting['meeting_name']} (meeting_key={meeting['meeting_key']})"
+        )
+    print(f"OpenF1 is reachable: {len(meetings)} finished race weekends since {since}")
+    return len(meetings)
+
+
 def slug(text: str) -> str:
     return re.sub(r"[^a-z0-9]+", "_", text.lower()).strip("_")
 
 
 def write_json(path: UPath, data: list | dict) -> None:
+    """Write to a temporary file first, so an interrupted run never leaves a truncated file behind."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(data), encoding="utf-8")
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(json.dumps(data), encoding="utf-8")
+    tmp.replace(path)
 
 
 def fetch_to_file(
@@ -243,7 +257,9 @@ def run(
 
     meetings = find_meetings(client, since)
     if not meetings:
-        sys.exit(f"No meetings found since {since}")
+        # Normal in weeks without a race: nothing to do is not a failure.
+        print(f"No finished race weekend since {since}, nothing to fetch")
+        return 0
 
     results = []
     for meeting in meetings:

@@ -5,6 +5,7 @@ name: deng
 services:
   postgres:
     image: postgres:18.6-alpine
+    restart: unless-stopped
     environment:
       POSTGRES_DB: ${POSTGRES_DB:?Set POSTGRES_DB in .env}
       POSTGRES_USER: ${POSTGRES_USER:?Set POSTGRES_USER in .env}
@@ -48,6 +49,7 @@ services:
   # Kestra's own metadata (flows, executions, logs). Kept apart from the project database.
   kestra-postgres:
     image: postgres:18.6-alpine
+    restart: unless-stopped
     environment:
       POSTGRES_DB: kestra
       POSTGRES_USER: kestra
@@ -62,6 +64,7 @@ services:
 
   kestra:
     image: kestra/kestra:v1.3.43
+    restart: unless-stopped
     command: server standalone
     # root is needed to use the Docker socket.
     user: "root"
@@ -75,7 +78,8 @@ services:
       - /tmp/kestra-wd:/tmp/kestra-wd
     environment:
       # ENV_* variables are available in flows as {{ envs.* }}.
-      ENV_HOST_DATA_DIR: ${PWD}/data
+      # Absolute host path of data/: task containers mount it from the host's Docker.
+      ENV_HOST_DATA_DIR: ${HOST_DATA_DIR:?Set HOST_DATA_DIR in .env}
       ENV_POSTGRES_DB: ${POSTGRES_DB:?Set POSTGRES_DB in .env}
       ENV_POSTGRES_USER: ${POSTGRES_USER:?Set POSTGRES_USER in .env}
       ENV_POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}

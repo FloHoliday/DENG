@@ -1,18 +1,19 @@
-# Kestra flow: ingest + store all race weekends since a date (scripts/ingest.py).
-# Rerun-safe because the script is idempotent: complete sessions (_SUCCESS) are skipped,
-# and each session is replaced in Postgres in one transaction.
+# Kestra flow: check source → fetch → load → transform → validate.
+# Every step is rerun-safe on its own: complete sessions (_SUCCESS) are not fetched again,
+# each session is replaced in Postgres in one transaction, and the models are rebuilt.
+# So a failed run is fixed with Restart (continues at the failed task) or a new run.
 id: f1_race_weekend
 namespace: deng.f1
 
 description: |
   Weekly incremental load: every Monday, ingest all race weekends that started in the
-  last 8 days. Manual run: set `since` (e.g. 2023-01-01 for the full historical backfill).
+  last 8 days. Manual run: set `since` (the default 2023-01-01 loads the full history).
   Backfill: Triggers tab → monday_after_race_weekend → Backfill executions.
 
 inputs:
   - id: since
     type: DATE
-    defaults: "2026-01-01"
+    defaults: "2023-01-01"
     description: Manual runs only. Ingest race weekends starting on/after this date.
   - id: force
     type: BOOL
@@ -39,23 +40,42 @@ triggers:
     cron: "0 6 * * 1"
     timezone: Europe/Zurich
 
+# Shared by all five tasks: each runs one script in the project image, in its own
+# container on the compose network, with data/ mounted from the host.
+pluginDefaults:
+  - type: io.kestra.plugin.scripts.shell.Commands
+    values:
+      containerImage: deng-f1-code:local
+      taskRunner:
+        type: io.kestra.plugin.scripts.runner.docker.Docker
+        pullPolicy: NEVER  # built locally with `docker compose build code`
+        networkMode: deng_default
+        volumes:
+          - "{{ envs.host_data_dir }}:/app/data"
+      env:
+        POSTGRES_HOST: postgres
+        POSTGRES_DB: "{{ envs.postgres_db }}"
+        POSTGRES_USER: "{{ envs.postgres_user }}"
+        POSTGRES_PASSWORD: "{{ envs.postgres_password }}"
+
 tasks:
-  - id: ingest_and_store
+  # Fails early if OpenF1 is down or locked by a live session.
+  - id: check_source
     type: io.kestra.plugin.scripts.shell.Commands
-    containerImage: deng-f1-code:local
-    taskRunner:
-      type: io.kestra.plugin.scripts.runner.docker.Docker
-      pullPolicy: NEVER  # built locally with `docker compose build code`
-      networkMode: deng_default
-      volumes:
-        - "{{ envs.host_data_dir }}:/app/data"
-    env:
-      POSTGRES_HOST: postgres
-      POSTGRES_DB: "{{ envs.postgres_db }}"
-      POSTGRES_USER: "{{ envs.postgres_user }}"
-      POSTGRES_PASSWORD: "{{ envs.postgres_password }}"
-    # Task-level retry on top of the script's per-request retries: covers the API being
-    # down for a while. Safe because a rerun only fetches and loads what is missing.
+    # Only the two network tasks retry: their failures can be temporary. Load, transform
+    # and validate fail for permanent reasons (bad data, bad SQL), a retry won't help.
+    retry:
+      type: exponential
+      interval: PT5M
+      maxInterval: PT1H
+      maxAttempts: 4
+    commands:
+      - cd /app
+      - python scripts/check_source.py --since {{ render(vars.since) }}
+
+  # Fails if any session is incomplete, so nothing half-fetched is loaded.
+  - id: fetch
+    type: io.kestra.plugin.scripts.shell.Commands
     retry:
       type: exponential
       interval: PT5M
@@ -64,8 +84,25 @@ tasks:
     commands:
       - cd /app
       - >-
-        python scripts/ingest.py
+        python scripts/fetch.py
         --since {{ render(vars.since) }}
         {{ inputs.force ? '--force' : '' }}
 
-  # - id: transform  # TODO: refresh staging/core/marts once the transform layer exists
+  - id: load
+    type: io.kestra.plugin.scripts.shell.Commands
+    commands:
+      - cd /app
+      - python scripts/load.py
+
+  - id: transform
+    type: io.kestra.plugin.scripts.shell.Commands
+    commands:
+      - cd /app
+      - python scripts/transform.py
+
+  # Fails the execution if a check fails; the loaded data stays for investigation.
+  - id: validate
+    type: io.kestra.plugin.scripts.shell.Commands
+    commands:
+      - cd /app
+      - python scripts/validate.py
