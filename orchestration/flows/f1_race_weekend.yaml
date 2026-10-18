@@ -64,11 +64,14 @@ tasks:
     type: io.kestra.plugin.scripts.shell.Commands
     # Only the two network tasks retry: their failures can be temporary. Load, transform
     # and validate fail for permanent reasons (bad data, bad SQL), a retry won't help.
+    # An outage or a live session lasts hours, not minutes: wait 15, 30, 60, 60 min
+    # (2h45 in total, longer than a race) before giving up.
     retry:
       type: exponential
-      interval: PT5M
+      interval: PT15M
+      delayFactor: 2
       maxInterval: PT1H
-      maxAttempts: 4
+      maxAttempts: 5
     commands:
       - cd /app
       - python scripts/check_source.py --since {{ render(vars.since) }}

@@ -65,7 +65,8 @@ services:
   kestra:
     image: kestra/kestra:v1.3.43
     restart: unless-stopped
-    command: server standalone
+    # Server settings live in orchestration/application.yaml (mounted below).
+    command: server standalone --config /etc/kestra/application.yaml
     # root is needed to use the Docker socket.
     user: "root"
     ports:
@@ -74,42 +75,18 @@ services:
       - kestra_data:/app/storage
       # Kestra starts each task as a sibling container on the host's Docker.
       - /var/run/docker.sock:/var/run/docker.sock
+      - ./orchestration/application.yaml:/etc/kestra/application.yaml:ro
     environment:
+      # Secrets for application.yaml: Kestra fills in its ${...} from these.
+      KESTRA_DB_PASSWORD: ${KESTRA_DB_PASSWORD:?Set KESTRA_DB_PASSWORD in .env}
+      KESTRA_LOGIN_USER: ${KESTRA_USER:?Set KESTRA_USER in .env}
+      KESTRA_LOGIN_PASSWORD: ${KESTRA_PASSWORD:?Set KESTRA_PASSWORD in .env}
       # ENV_* variables are available in flows as {{ envs.* }}.
       # Absolute host path of data/: task containers mount it from the host's Docker.
       ENV_HOST_DATA_DIR: ${HOST_DATA_DIR:?Set HOST_DATA_DIR in .env}
       ENV_POSTGRES_DB: ${POSTGRES_DB:?Set POSTGRES_DB in .env}
       ENV_POSTGRES_USER: ${POSTGRES_USER:?Set POSTGRES_USER in .env}
       ENV_POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
-      KESTRA_CONFIGURATION: |
-        datasources:
-          postgres:
-            url: jdbc:postgresql://kestra-postgres:5432/kestra
-            driverClassName: org.postgresql.Driver
-            username: kestra
-            password: ${KESTRA_DB_PASSWORD}
-        kestra:
-          server:
-            basicAuth:
-              username: ${KESTRA_USER:?Set KESTRA_USER in .env}
-              password: ${KESTRA_PASSWORD:?Set KESTRA_PASSWORD in .env}
-          repository:
-            type: postgres
-          queue:
-            type: postgres
-          storage:
-            type: local
-            local:
-              basePath: /app/storage
-          url: http://localhost:${KESTRA_PORT:-8080}/
-          tutorial-flows:
-            enabled: false
-          plugins:
-            configurations:
-              # Allows the flow to mount data/ into the task container.
-              - type: io.kestra.plugin.scripts.runner.docker.Docker
-                values:
-                  volume-enabled: true
     healthcheck:
       test: ["CMD-SHELL", "curl -fs http://localhost:8081/health"]
       interval: 5s

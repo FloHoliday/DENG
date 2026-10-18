@@ -501,7 +501,9 @@ Docker. All ports are bound to `127.0.0.1`.
 ├── Dockerfile                pipeline image deng-f1-code:local
 ├── .env.example              configuration template, copy to .env
 ├── pyproject.toml, uv.lock   Python dependencies (installed in the image with uv)
-├── orchestration/flows/      Kestra flow f1_race_weekend.yaml
+├── orchestration/
+│   ├── application.yaml      Kestra server configuration (mounted into the kestra container)
+│   └── flows/                Kestra flow f1_race_weekend.yaml
 ├── scripts/                  one entry point per pipeline step
 ├── src/                      fetch.py, load.py, transform.py, validate.py
 ├── sql/
