@@ -17,15 +17,13 @@ WORKDIR /app
 RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=bind,source=uv.lock,target=uv.lock \
     --mount=type=bind,source=pyproject.toml,target=pyproject.toml \
-    uv sync --locked --no-install-project
+    uv sync --locked
 
 # Copy the project into the image
 COPY . /app
 
-# Sync the project
-RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --locked
-
 # Put the project's venv first on PATH so `python` resolves to it
 ENV PATH="/app/.venv/bin:$PATH"
 
+ENTRYPOINT ["python"]
+CMD ["scripts/ingest.py"]

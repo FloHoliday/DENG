@@ -35,11 +35,10 @@ age + conditions).
 - **Access method:** HTTP GET, JSON or CSV (`csv=true`), no authentication
   required for historical data (2023 season onward). Filterable by session,
   driver, and other attributes via query parameters. **Exception:** while any live F1 session (practice, qualifying,
-  sprint or
-  race) is in progress, access to **everything** is denied without a paid API
+  sprint or race) is in progress, access to **everything** is denied without a paid API
   key - including all historical data (HTTP 401 "Live F1 session in
   progress"). Free access returns once the session has ended.
-- **Sessions used:** only the **Race** and **Sprint** sessions of a race
+- **Sessions used:** only the **Race** session of a race
   weekend. Practice and qualifying laps are not used (the qualifying result
   only enters through `starting_grid`).
 - **Endpoints used:**
@@ -54,7 +53,7 @@ age + conditions).
     - `weather` - ~1 row/minute, track/air temperature, rainfall (degradation)
     - `session_result`, `starting_grid` - final classification vs. grid
       position. OpenF1 keys the grid on the *qualifying* session, so it is
-      fetched from there and stored next to the Race/Sprint it belongs to.
+      fetched from there and stored next to the Race it belongs to.
     - `car_data` - high-frequency telemetry (~3.7 Hz per car), **Race session
       only**, fetched per driver and aggregated to lap grain during
       transformation
@@ -91,28 +90,30 @@ responses unchanged as raw JSON files. It does not touch the database;
 loading the files into the database is the
 [store step](#3-initial-ingestion-and-storage-strategy).
 
-- **Script:** `scripts/ingest_race_weekend.py` downloads the Race and Sprint
-  sessions of all finished, non-cancelled race weekends since a given date
-  into `data/raw`, one JSON file per endpoint/session.
-- **Failure behaviour:** requests are throttled and retried with
-  exponential backoff (429, 5xx, timeouts). A session folder gets a
+- **Script:** `scripts/ingest.py` runs both steps from `src/`:
+  `fetch.py` downloads the Race session of all finished,
+  non-cancelled race weekends since a given date into `data/raw`, one JSON
+  file per endpoint/session, then `ingest.py` loads them into PostgreSQL
+  (see [Storing](#storing)).
+- **Failure behaviour:** requests are throttled to 3/second and 30/minute
+  (`pyrate-limiter`) and retried with exponential backoff on 422, 429, 5xx
+  and timeouts (`tenacity`). A session folder gets a
   `_SUCCESS` marker (timestamp + row counts) only after all its endpoints
   were downloaded, the script exits non-zero otherwise. Already-downloaded
   files are skipped on re-run, so a failed ingestion is resumed simply by running
   it again (`--force` forces a re-fetch).
 
 ```bash
-uv sync
+docker compose up -d postgres
 
 # all race weekends since 1 January 2025
-uv run scripts/ingest_race_weekend.py --since 2025-01-01
+docker compose run --rm code scripts/ingest.py --since 2025-01-01
 ```
 
 | Flag               | Meaning                                                      |
 |--------------------|--------------------------------------------------------------|
 | `--since`          | required: race weekends starting on or after this date (ISO) |
-| `--skip-telemetry` | don't fetch `car_data` (fast run, ~15 s per weekend)         |
-| `--out-dir`        | target directory (default `data/raw`)                        |
+| `--raw-dir`        | raw file directory or `gs://bucket/path` (default `data/raw`)|
 | `--force`          | re-fetch files that already exist                            |
 
 Race weekends are found via
@@ -125,6 +126,28 @@ before today is left for the next run.
 > then stops with `OpenF1 access denied: Live F1 session in progress…` -
 > simply run it again after the session has ended.
 
+#### Storing
+
+After fetching, `src/ingest.py` loads the raw files into
+PostgreSQL (schema `public`, tables defined in `sql/schema.sql`): one table
+per endpoint with one typed column per API field plus `loaded_at`, and
+`meetings` and `sessions`. No `jsonb`: a field the table doesn't define or
+a value of the wrong type fails the session's load.
+
+- **Credentials:** `POSTGRES_HOST` (default `localhost`), `POSTGRES_PORT`
+  (default `5432`), `POSTGRES_DB`, `POSTGRES_USER`, `POSTGRES_PASSWORD`.
+- **Incremental:** `loaded_sessions` records the `_SUCCESS` marker each
+  session was loaded from. Only sessions with a new marker are loaded:
+  newly completed ones, or ones re-fetched with `--force`. Deleting a row
+  from `loaded_sessions` reloads that session on the next run.
+- **One transaction per session:** a session's rows are deleted and
+  inserted again, then the row counts are checked against `_SUCCESS`. On a
+  mismatch or error the whole session is rolled back, and its earlier rows
+  stay. `meetings` and `sessions` are upserted on their key, so re-runs
+  never create duplicates.
+- **Starting grid:** `starting_grid.race_session_key` is the Race the
+  grid belongs to; `session_key` is the *qualifying* session that set it.
+
 ## 3. Initial ingestion and storage strategy
 
 The pipeline has three steps: **ingest** (OpenF1 API → raw JSON files, see
@@ -132,7 +155,7 @@ The pipeline has three steps: **ingest** (OpenF1 API → raw JSON files, see
 tables in the database, unchanged) and **transform** (staging → curated
 tables). The curated tables are what the pipeline **serves**: descriptive
 and ML-ready tables for analysis (see [Architecture](#4-architecture-v01)).
-The store step is not implemented yet.
+Ingest and store are implemented (see [Storing](#storing)).
 
 - **Mode:** batch, per race weekend (meeting). A meeting is stored once its
   ingestion has completed.
@@ -146,16 +169,13 @@ The store step is not implemented yet.
   tables and transform into curated BigQuery tables. Local storage is
   used only for development/testing, never as a dependency of the production
   path.
-- **Schema-on-write:** the database layers enforce a schema when data is
-  loaded, not when it is queried. dlt maps each endpoint's JSON to typed
-  staging tables, and its schema contract is set to reject new columns and
-  type changes. Because OpenF1 has no documented schema versioning, source
-  changes then fail the load visibly instead of silently reaching
-  transformation. dbt models define the curated schema, with tests on keys
-  and grain.
-- **Failure behaviour (planned):** only session folders with a `_SUCCESS`
-  marker are stored, so incomplete downloads never reach the database.
-  Each session is loaded in one transaction.
+- **Schema-on-write:** the raw tables have one typed column per API field.
+  A new, renamed or wrongly typed OpenF1 field makes the session's load
+  fail and roll back, so source changes surface at load time instead of in
+  the curated tables. Mixed fields (`gap_to_leader`, `interval`: seconds or
+  `+1 LAP`) are stored as `text`.
+- **Failure behaviour:** only session folders with a `_SUCCESS` marker are
+  stored, so incomplete downloads never reach the database.
 
 ## 4. Architecture v0.1
 
@@ -168,11 +188,11 @@ destination changes.
 
 ```mermaid
 flowchart LR
-    source["Source<br/>OpenF1 REST API<br/>Race + Sprint sessions<br/>JSON per endpoint"]
+    source["Source<br/>OpenF1 REST API<br/>Race sessions<br/>JSON per endpoint"]
 
     subgraph orchestrator["Orchestrator: one run per race weekend, retries, backfills"]
-        ingest["Ingest<br/>Python batch job<br/>ingest_race_weekend.py<br/>full backfill 2023–2025<br/>+ incremental 2026"]
-        store["Store<br/>staging tables<br/>schema-on-write (dlt)<br/>merge by session key"]
+        ingest["Ingest<br/>Python batch job<br/>src/fetch.py<br/>full backfill 2023–2025<br/>+ incremental 2026"]
+        store["Store<br/>raw tables<br/>PostgreSQL, typed columns<br/>replace by session key"]
         transform["Transform<br/>SQL / dbt<br/>clean, join, aggregate<br/>car_data to lap grain"]
     end
 
@@ -193,9 +213,9 @@ environments):
 ## 5. Project plan / backlog (Week 3 → Week 7)
 
 - [x] Confirm team roles and split ingest/store vs. transform ownership
-- [x] Write ingest script for one race weekend (`scripts/ingest_race_weekend.py`)
+- [x] Write ingest script for one race weekend (`src/fetch.py`)
 - [x] Stand up local PostgreSQL + Docker Compose environment
-- [ ] Write store step: load `data/raw` (sessions with `_SUCCESS`) into
+- [x] Write store step: load `data/raw` (sessions with `_SUCCESS`) into
   PostgreSQL staging tables
 - [ ] Lap-level aggregation of `car_data`
 - [ ] Define and implement first justified transformation (lap-grain fact
@@ -221,8 +241,9 @@ layout, with the pipeline code grouped under `src/`.
   - `external/`: data from third-party sources
 - `notebooks/`: exploration, named `<nr>-<initials>-<description>`
 - `scripts/`: command-line entry points, e.g. ingestion runs
-- `src/`: source code of the pipeline
-  - `pipelines/`: dlt ingestion pipelines
+- `src/`: source code of the pipeline, flat modules: ingest (`fetch.py`) and
+  store (`ingest.py`) steps
+- `sql/`: database schema of the store step
   - `transform/`: dbt project, staging → curated tables
   - `orchestration/`: Orchestrator assets, meeting partitions, schedules
   - `infra/`: Terraform for BigQuery
