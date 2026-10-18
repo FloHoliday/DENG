@@ -74,8 +74,6 @@ services:
       - kestra_data:/app/storage
       # Kestra starts each task as a sibling container on the host's Docker.
       - /var/run/docker.sock:/var/run/docker.sock
-      # Task working directories must have the same path on the host and in Kestra.
-      - /tmp/kestra-wd:/tmp/kestra-wd
     environment:
       # ENV_* variables are available in flows as {{ envs.* }}.
       # Absolute host path of data/: task containers mount it from the host's Docker.
@@ -103,9 +101,6 @@ services:
             type: local
             local:
               basePath: /app/storage
-          tasks:
-            tmpDir:
-              path: /tmp/kestra-wd/tmp
           url: http://localhost:${KESTRA_PORT:-8080}/
           tutorial-flows:
             enabled: false
