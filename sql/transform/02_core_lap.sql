@@ -91,12 +91,18 @@ enriched AS (
         LIMIT 1
     ) AS w ON true
 ),
--- Fuel correction: the car gets about 0.035 s/lap faster as fuel burns off (assumption).
--- Subtracting the remaining fuel effect makes early and late laps comparable.
+-- Fuel correction: every kg of fuel costs about 0.03 s per lap, a race starts with about
+-- 100 kg and burns the same amount every lap (rule of thumb, not measured per car).
+-- Subtracting the effect of the remaining fuel makes early and late laps comparable.
+-- Sources: Michelin Simulation, "Showing our sensitive side" (2018), 0.03 s per kg
+--   https://simulation.michelin.com/canopy/technical-articles/showing-our-sensitive-side
+-- TracingInsights, same formula with 100 kg and linear burn
+--   https://github.com/TracingInsights/2026
 corrected AS (
     SELECT
         *,
-        lap_duration - (total_laps - lap_number) * 0.035 AS fuel_corrected_lap_s,
+        lap_duration - 0.03 * 100.0 * (total_laps - lap_number) / total_laps
+            AS fuel_corrected_lap_s,
         lap_number > 1
             AND NOT is_pit_in_lap
             AND NOT is_pit_out_lap

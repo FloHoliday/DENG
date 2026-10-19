@@ -385,8 +385,12 @@ gives the same result and a changed definition is picked up automatically.
 - `is_clean_lap`: not lap 1, no pit in/out lap, no Safety Car/VSC/red flag, no rain, and
   faster than 107 % of the driver's median green lap. Only these laps show real tyre
   pace; the others are dominated by the start, pit lane, neutralisation or traffic.
-- Fuel correction: `lap_duration - (total_laps - lap_number) * 0.035 s`. A car gets
-  faster as fuel burns off, which would hide tyre degradation.
+- Fuel correction: `lap_duration - 0.03 s/kg * 100 kg * (total_laps - lap_number) / total_laps`,
+  i.e. 0.03 s per kg of remaining fuel, 100 kg at the start, the same amount burned every
+  lap. A car gets faster as fuel burns off, which would hide tyre degradation. Sources:
+  [Michelin Simulation, "Showing our sensitive side" (2018)](https://simulation.michelin.com/canopy/technical-articles/showing-our-sensitive-side)
+  (0.03 s per additional kg) and [TracingInsights](https://github.com/TracingInsights/2026)
+  (same formula with 100 kg and linear burn).
 - Degradation per stint = slope of fuel-corrected lap time over tyre age (clean laps
   only, at least 5). Marts use the **median of stint slopes**, so every driver is only
   compared with themselves.
@@ -517,8 +521,10 @@ Docker. All ports are bound to `127.0.0.1`.
 
 - OpenF1 is unofficial, community-run, has no SLA and a 3 requests/second limit; it is
   completely unavailable during live F1 sessions.
-- Fuel effect of 0.035 s/lap is an assumption, not measured. Track evolution (the track
-  getting faster during a race) is not corrected.
+- The fuel correction is a rule of thumb (0.03 s/kg, 100 kg, linear burn), not measured:
+  the real fuel load and burn differ per car, circuit and fuel-saving, and the 2026 cars
+  start with less fuel. Track evolution (the track getting faster during a race) is not
+  corrected.
 - SOFT/MEDIUM/HARD are relative per race (Pirelli picks three of its compounds); they are
   only comparable within one circuit and season. The 2026 regulation change means
   2023-2025 degradation does not transfer 1:1 to 2026.
