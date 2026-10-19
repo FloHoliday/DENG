@@ -52,7 +52,7 @@ def insert(connection, table: str, rows: list[dict], conflict_key: str | None = 
             raise ValueError(f"{table}: invalid field name {column!r}")
     names = ", ".join(f'"{c}"' for c in columns)
     values = ", ".join(f":{c}" for c in columns)
-    sql = f"INSERT INTO public.{table} ({names}) VALUES ({values})"
+    sql = f"INSERT INTO raw.{table} ({names}) VALUES ({values})"
     if conflict_key:
         updates = ", ".join(f'"{c}" = EXCLUDED."{c}"' for c in columns)
         sql += (
@@ -81,7 +81,7 @@ def load_session(session_dir: UPath, engine) -> int:
         for table in TABLES:
             key = KEY_COLUMNS.get(table, "session_key")
             connection.execute(
-                text(f"DELETE FROM public.{table} WHERE {key} = :k"),
+                text(f"DELETE FROM raw.{table} WHERE {key} = :k"),
                 {"k": session_key},
             )
             for path in table_files(session_dir, table):
@@ -97,7 +97,7 @@ def load_session(session_dir: UPath, engine) -> int:
                 if name.split("/")[0] == table
             )
             actual = connection.scalar(
-                text(f"SELECT COUNT(*) FROM public.{table} WHERE {key} = :k"),
+                text(f"SELECT COUNT(*) FROM raw.{table} WHERE {key} = :k"),
                 {"k": session_key},
             )
             if actual != expected:
@@ -108,7 +108,7 @@ def load_session(session_dir: UPath, engine) -> int:
 
         connection.execute(
             text("""
-                INSERT INTO public.loaded_sessions (session_key, completed_at) VALUES (:k, :c)
+                INSERT INTO raw.loaded_sessions (session_key, completed_at) VALUES (:k, :c)
                 ON CONFLICT (session_key) DO UPDATE
                 SET completed_at = EXCLUDED.completed_at, loaded_at = now()
             """),
@@ -128,7 +128,7 @@ def run(raw_dir: UPath) -> int:
             connection.execute(text(SCHEMA.read_text(encoding="utf-8")))
             loaded_markers = dict(
                 connection.execute(
-                    text("SELECT session_key, completed_at FROM public.loaded_sessions")
+                    text("SELECT session_key, completed_at FROM raw.loaded_sessions")
                 ).fetchall()
             )
 

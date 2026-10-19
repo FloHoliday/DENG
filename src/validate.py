@@ -16,7 +16,7 @@ def unloaded_sessions(raw_dir: UPath, connection) -> list[str]:
     """Session folders whose _SUCCESS marker is not the one recorded in loaded_sessions."""
     loaded = dict(
         connection.execute(
-            text("SELECT session_key, completed_at FROM public.loaded_sessions")
+            text("SELECT session_key, completed_at FROM raw.loaded_sessions")
         ).fetchall()
     )
     missing = []

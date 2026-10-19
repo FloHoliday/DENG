@@ -31,7 +31,7 @@ DECLARE
 BEGIN
     FOR todo IN
         SELECT ls.session_key, ls.loaded_at
-        FROM public.loaded_sessions AS ls
+        FROM raw.loaded_sessions AS ls
         JOIN staging.stg_sessions AS s USING (session_key)
         LEFT JOIN core.telemetry_sessions AS t USING (session_key)
         WHERE s.is_race AND t.source_loaded_at IS DISTINCT FROM ls.loaded_at

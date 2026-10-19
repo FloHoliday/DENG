@@ -3,7 +3,7 @@
 -- Can also be run on its own in pgAdmin to see the same result.
 WITH loaded_races AS (
     SELECT ls.session_key
-    FROM public.loaded_sessions AS ls
+    FROM raw.loaded_sessions AS ls
     JOIN staging.stg_sessions AS s USING (session_key)
     WHERE s.is_race
 ),
@@ -24,7 +24,7 @@ mart_rows AS (
 SELECT 'raw laps: one row per (session, driver, lap)' AS check, count(*) AS failures,
        string_agg(DISTINCT session_key::text, ', ') AS detail
 FROM (
-    SELECT session_key FROM public.laps
+    SELECT session_key FROM raw.laps
     GROUP BY session_key, driver_number, lap_number HAVING count(*) > 1
 ) AS d
 
@@ -32,7 +32,7 @@ UNION ALL
 SELECT 'raw stints: one row per (session, driver, stint)', count(*),
        string_agg(DISTINCT session_key::text, ', ')
 FROM (
-    SELECT session_key FROM public.stints
+    SELECT session_key FROM raw.stints
     GROUP BY session_key, driver_number, stint_number HAVING count(*) > 1
 ) AS d
 
@@ -40,7 +40,7 @@ UNION ALL
 SELECT 'raw pit: one row per (session, driver, lap)', count(*),
        string_agg(DISTINCT session_key::text, ', ')
 FROM (
-    SELECT session_key FROM public.pit
+    SELECT session_key FROM raw.pit
     GROUP BY session_key, driver_number, lap_number HAVING count(*) > 1
 ) AS d
 
@@ -48,8 +48,8 @@ UNION ALL
 SELECT 'every loaded race has a result and a starting grid', count(*),
        string_agg(r.session_key::text, ', ')
 FROM loaded_races AS r
-WHERE NOT EXISTS (SELECT 1 FROM public.session_result AS x WHERE x.session_key = r.session_key)
-   OR NOT EXISTS (SELECT 1 FROM public.starting_grid AS x WHERE x.race_session_key = r.session_key)
+WHERE NOT EXISTS (SELECT 1 FROM raw.session_result AS x WHERE x.session_key = r.session_key)
+   OR NOT EXISTS (SELECT 1 FROM raw.starting_grid AS x WHERE x.race_session_key = r.session_key)
 
 UNION ALL
 SELECT 'every loaded race is in core.fct_lap', count(*), string_agg(r.session_key::text, ', ')
@@ -60,7 +60,7 @@ UNION ALL
 SELECT 'telemetry is up to date for every loaded race', count(*),
        string_agg(r.session_key::text, ', ')
 FROM loaded_races AS r
-JOIN public.loaded_sessions AS ls USING (session_key)
+JOIN raw.loaded_sessions AS ls USING (session_key)
 LEFT JOIN core.telemetry_sessions AS t USING (session_key)
 WHERE t.source_loaded_at IS DISTINCT FROM ls.loaded_at
    OR NOT EXISTS (SELECT 1 FROM core.fct_lap_telemetry AS x WHERE x.session_key = r.session_key)

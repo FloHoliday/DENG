@@ -1,5 +1,5 @@
 -- Staging: one plain view per raw table. Only renaming, typing and cleaning, no joins
--- and no copy of the data. Everything downstream reads from here, never from public.*.
+-- and no copy of the data. Everything downstream reads from here, never from raw.* directly.
 CREATE SCHEMA IF NOT EXISTS staging;
 
 -- OpenF1 also labels Sprints session_type 'Race', so session_name decides.
@@ -15,8 +15,8 @@ SELECT
     s.session_name = 'Race' AS is_race,
     s.date_start,
     s.date_end
-FROM public.sessions AS s
-JOIN public.meetings AS m USING (meeting_key)
+FROM raw.sessions AS s
+JOIN raw.meetings AS m USING (meeting_key)
 WHERE NOT coalesce(s.is_cancelled, false);
 
 CREATE VIEW staging.stg_drivers AS
@@ -26,7 +26,7 @@ SELECT DISTINCT ON (session_key, driver_number)
     name_acronym,
     full_name,
     team_name
-FROM public.drivers
+FROM raw.drivers
 ORDER BY session_key, driver_number;
 
 CREATE VIEW staging.stg_laps AS
@@ -41,7 +41,7 @@ SELECT
     duration_sector_3,
     st_speed AS speed_trap_kmh,
     coalesce(is_pit_out_lap, false) AS is_pit_out_lap
-FROM public.laps;
+FROM raw.laps;
 
 -- One stint with a NULL compound exists; it becomes UNKNOWN instead of disappearing.
 CREATE VIEW staging.stg_stints AS
@@ -54,7 +54,7 @@ SELECT
     lap_start,
     lap_end,
     coalesce(tyre_age_at_start, 0) AS tyre_age_at_start
-FROM public.stints;
+FROM raw.stints;
 
 -- lap_number is the lap on which the car entered the pit lane (the in-lap).
 -- pit_duration is deprecated and always equals lane_duration.
@@ -66,7 +66,7 @@ SELECT
     date,
     lane_duration AS lane_duration_s,
     stop_duration AS stop_duration_s -- only from the 2024 US GP onwards
-FROM public.pit;
+FROM raw.pit;
 
 -- event: the race-control messages that start or end a neutralisation.
 -- lap_number is the leader's lap.
@@ -87,7 +87,7 @@ SELECT
         WHEN category = 'SessionStatus' AND message = 'SESSION STARTED' THEN 'START'
         WHEN flag = 'CHEQUERED' THEN 'FINISH'
     END AS event
-FROM public.race_control;
+FROM raw.race_control;
 
 CREATE VIEW staging.stg_weather AS
 SELECT
@@ -98,12 +98,12 @@ SELECT
     humidity,
     wind_speed,
     rainfall > 0 AS rainfall
-FROM public.weather;
+FROM raw.weather;
 
 -- One row per position change (not per lap).
 CREATE VIEW staging.stg_position AS
 SELECT session_key, driver_number, date, position
-FROM public.position;
+FROM raw.position;
 
 -- gap_to_leader / interval are seconds or '+N LAP(S)': split into seconds and laps.
 CREATE VIEW staging.stg_intervals AS
@@ -114,7 +114,7 @@ SELECT
     CASE WHEN gap_to_leader ~ '^[0-9.]+$' THEN gap_to_leader::numeric END AS gap_to_leader_s,
     CASE WHEN "interval" ~ '^[0-9.]+$' THEN "interval"::numeric END AS interval_s,
     substring(gap_to_leader FROM '^\+([0-9]+) LAP')::integer AS laps_behind_leader
-FROM public.intervals;
+FROM raw.intervals;
 
 CREATE VIEW staging.stg_session_result AS
 SELECT
@@ -128,7 +128,7 @@ SELECT
     coalesce(dsq, false) AS dsq,
     CASE WHEN gap_to_leader ~ '^[0-9.]+$' THEN gap_to_leader::numeric END AS gap_to_leader_s,
     substring(gap_to_leader FROM '^\+([0-9]+) LAP')::integer AS laps_behind_leader
-FROM public.session_result;
+FROM raw.session_result;
 
 -- Keyed by the Race; qualifying_session_key is the session that set the grid.
 CREATE VIEW staging.stg_starting_grid AS
@@ -137,7 +137,7 @@ SELECT
     session_key AS qualifying_session_key,
     driver_number,
     position AS grid_position
-FROM public.starting_grid;
+FROM raw.starting_grid;
 
 -- throttle goes up to 104 (about 10 percent of samples): keep the raw value, add a 0-100 scale.
 -- brake is 0, 100 or 104: on/off.
@@ -153,4 +153,4 @@ SELECT
     brake > 0 AS is_braking,
     n_gear,
     rpm
-FROM public.car_data;
+FROM raw.car_data;

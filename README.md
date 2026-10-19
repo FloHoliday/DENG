@@ -168,15 +168,19 @@ Or use **pgAdmin** at **http://localhost:8085** (log in with `PGADMIN_DEFAULT_EM
 `PGADMIN_DEFAULT_PASSWORD`), then **Servers → Register → Server**: name `F1`, tab
 *Connection*: host `postgres`, port `5432`, database/user/password from your `.env`.
 
+The strategist tables are in schema `marts`, which is the default: `SELECT * FROM
+mart_pit_loss` works without a prefix. Raw tables must be named with their schema, e.g.
+`raw.laps`.
+
 **Reference race: 2026 Singapore Grand Prix** (`session_key = 11388`). These numbers are
 the same on every machine:
 
 ```sql
-SELECT 'laps' AS table_name, count(*) FROM public.laps WHERE session_key = 11388
-UNION ALL SELECT 'stints', count(*) FROM public.stints WHERE session_key = 11388
-UNION ALL SELECT 'pit', count(*) FROM public.pit WHERE session_key = 11388
-UNION ALL SELECT 'intervals', count(*) FROM public.intervals WHERE session_key = 11388
-UNION ALL SELECT 'car_data', count(*) FROM public.car_data WHERE session_key = 11388;
+SELECT 'laps' AS table_name, count(*) FROM raw.laps WHERE session_key = 11388
+UNION ALL SELECT 'stints', count(*) FROM raw.stints WHERE session_key = 11388
+UNION ALL SELECT 'pit', count(*) FROM raw.pit WHERE session_key = 11388
+UNION ALL SELECT 'intervals', count(*) FROM raw.intervals WHERE session_key = 11388
+UNION ALL SELECT 'car_data', count(*) FROM raw.car_data WHERE session_key = 11388;
 ```
 
 | table_name | count |
@@ -297,7 +301,7 @@ container from the project image; the logic lives in [`src/`](src).
 |---|---|---|---|---|---|
 | 1 | `check_source` | `check_source.py --since DATE` | Asks OpenF1 for finished race weekends since `DATE` and lists them | API down or locked by a live session | yes |
 | 2 | `fetch` | `fetch.py --since DATE [--force]` | Downloads every endpoint of each Race into `data/raw/<year>/<meeting>/<session>/` (in the Docker volume `deng_raw_data`), unchanged JSON | any session incomplete | yes |
-| 3 | `load` | `load.py` | Loads every complete session into typed tables in schema `public` | wrong type, unknown field, row-count mismatch | no |
+| 3 | `load` | `load.py` | Loads every complete session into typed tables in schema `raw` | wrong type, unknown field, row-count mismatch | no |
 | 4 | `transform` | `transform.py [--full-refresh]` | Rebuilds the `staging`, `core` and `marts` models from [`sql/transform/`](sql/transform) | SQL error, duplicate key on a model's grain | no |
 | 5 | `validate` | `validate.py` | Runs the checks in [`sql/verify.sql`](sql/verify.sql) plus raw-files-vs-database | any check fails | no |
 
@@ -321,13 +325,13 @@ is loaded. A rerun skips everything that is already complete.
 
 ### 6.2 Load (storage)
 
-- Schema-on-write: one table per endpoint in schema `public` with one typed column per
+- Schema-on-write: one table per endpoint in schema `raw` with one typed column per
   API field ([`sql/schema.sql`](sql/schema.sql)). A new, renamed or wrongly typed field
   fails the session's load instead of slipping through.
 - **One transaction per session:** delete the session's rows, insert them again, compare
   every table's row count with `_SUCCESS`. On any error the session is rolled back and
   its earlier rows stay.
-- **Incremental:** `public.loaded_sessions` records which `_SUCCESS` marker each session
+- **Incremental:** `raw.loaded_sessions` records which `_SUCCESS` marker each session
   was loaded from; only new or re-fetched sessions are loaded.
 
 ### 6.3 Transform and validate
@@ -356,7 +360,7 @@ so that Kestra and `docker compose run` use the new version.
 ELT: the data is loaded unchanged first, then transformed with SQL inside PostgreSQL.
 
 ```text
-public.*  (raw, typed)  →  staging (views)  →  core (facts)  →  marts (for the strategist)
+raw  (typed tables)  →  staging (views)  →  core (facts)  →  marts (for the strategist)
 ```
 
 | Layer | Materialization | Why |
@@ -470,7 +474,7 @@ flowchart LR
 
     raw[("data/raw<br/>immutable JSON files<br/>volume deng_raw_data")]
     subgraph pg["PostgreSQL (Docker Compose)"]
-        public[("public<br/>typed raw tables")]
+        rawdb[("raw<br/>typed tables")]
         staging[("staging<br/>views")]
         core[("core<br/>facts, telemetry")]
         marts[("marts<br/>strategist tables")]
@@ -479,7 +483,7 @@ flowchart LR
 
     source --> check
     source --> fetch
-    fetch --> raw --> load --> public
+    fetch --> raw --> load --> rawdb
     transform -.-> staging & core & marts
     marts --> user
 ```
