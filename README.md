@@ -42,7 +42,7 @@ Windows PowerShell, unless a step says otherwise.
 ### Step 1: clone the repository
 
 ```sh
-git clone <repo-url> DENG
+git clone https://github.com/FloHoliday/DENG.git
 cd DENG
 ```
 
