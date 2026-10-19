@@ -19,4 +19,6 @@ if __name__ == "__main__":
         help="local path or gs://bucket/path, default: data/raw",
     )
     args = parser.parse_args()
-    load.run(args.raw_dir)
+    failed = load.run(args.raw_dir)
+    if failed:
+        sys.exit(f"{failed} sessions failed to load, see the errors above")

@@ -1,4 +1,4 @@
-"""Ingest step: fetch the raw OpenF1 data of all race weekends since a date and save it unchanged as JSON."""
+"""Fetch step: fetch the raw OpenF1 data of all race weekends since a date and save it unchanged as JSON."""
 
 import json
 import re
@@ -29,6 +29,9 @@ SESSION_ENDPOINTS = [
     "weather",
     "intervals",
 ]
+# May legitimately be empty: a race without pit stops, a driver who didn't start (no
+# car_data). Every other endpoint must return rows, otherwise the fetch counts as failed.
+MAY_BE_EMPTY = {"pit", "car_data"}
 
 
 def is_retryable(exc: BaseException) -> bool:
@@ -121,7 +124,7 @@ def fetch_to_file(
         return rows
     start = time.monotonic()
     data = client.get(endpoint, params)
-    if not data:
+    if not data and endpoint not in MAY_BE_EMPTY:
         raise ValueError(f"{endpoint}: no data for {params}")
     write_json(path, data)
     print(
@@ -161,6 +164,9 @@ def fetch_session(
     if (session_dir / "_SUCCESS").exists() and not force:
         print("skip  session (complete)")
         return True
+    # A forced re-fetch removes the marker first: if it fails partway, the session must
+    # not look complete with a mix of old and new files.
+    (session_dir / "_SUCCESS").unlink(missing_ok=True)
 
     counts: dict[str, int] = {}
     failed = False

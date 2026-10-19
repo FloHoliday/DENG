@@ -3,6 +3,7 @@
 import json
 import os
 import re
+import sys
 from datetime import datetime
 from pathlib import Path
 
@@ -117,7 +118,10 @@ def load_session(session_dir: UPath, engine) -> int:
 
 
 def run(raw_dir: UPath) -> int:
-    """Load every session whose _SUCCESS marker is newer than its last load; returns the number loaded."""
+    """Load every session whose _SUCCESS marker is newer than its last load; returns the number failed.
+
+    A failed session is rolled back and reported; the sessions after it are still loaded.
+    """
     engine = create_engine_from_env()
     try:
         with engine.begin() as connection:
@@ -129,6 +133,7 @@ def run(raw_dir: UPath) -> int:
             )
 
         count = 0
+        failed = 0
         for marker in sorted(raw_dir.glob("**/_SUCCESS")):
             session_dir = marker.parent
             session_key = int(session_dir.name.split("_")[0])
@@ -136,10 +141,15 @@ def run(raw_dir: UPath) -> int:
             if loaded_markers.get(session_key) == completed_at:
                 print(f"skip  {session_dir} (already loaded)")
                 continue
-            rows = load_session(session_dir, engine)
+            try:
+                rows = load_session(session_dir, engine)
+            except Exception as exc:  # noqa: BLE001 - report every failed session, then fail the step
+                print(f"FAILED {session_dir}: {exc}", file=sys.stderr)
+                failed += 1
+                continue
             print(f"load  {session_dir}: {rows:,} rows")
             count += 1
-        print(f"Loaded {count} sessions into PostgreSQL")
-        return count
+        print(f"Loaded {count} sessions into PostgreSQL, {failed} failed")
+        return failed
     finally:
         engine.dispose()
