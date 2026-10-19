@@ -85,13 +85,13 @@ docker compose up -d --wait
 
 The first command builds `deng-f1-code:local`, the image that contains the pipeline
 scripts (Kestra starts every task from it). The second starts PostgreSQL, pgAdmin,
-Kestra, Kestra's own database, and imports the flow into Kestra. It takes 1-2 minutes.
+Kestra and Kestra's own database; Kestra loads the flow from `orchestration/flows/` by
+itself. It takes 1-2 minutes.
 
 **Expected:** the last lines all say `Healthy`, e.g.
 
 ```text
  ✔ Container deng-kestra-1          Healthy
- ✔ Container deng-kestra-flows-1    Healthy
 ```
 
 ### Step 5: run the pipeline in Kestra
@@ -228,11 +228,11 @@ With the full history loaded, the same queries also return rows for 2023-2025.
 | `Cannot connect to the Docker daemon` / `docker: command not found` | Docker Desktop is not running. Start it and wait until it says *running*. |
 | http://localhost:8080 does not load | Kestra needs about 30 s after starting. Check `docker compose ps`: `deng-kestra-1` must be `healthy`. If the containers are gone (Docker restarted), run `docker compose up -d --wait`. |
 | Kestra login fails | Use exactly `KESTRA_USER` / `KESTRA_PASSWORD` from your `.env`. If you changed them after the first start, run `docker compose up -d --wait` again. |
-| Flow `f1_race_weekend` is not listed in Kestra | Re-import it: `docker compose restart kestra-flows`, then reload the page. |
+| Flow `f1_race_weekend` is not listed in Kestra | Kestra syncs it from `orchestration/flows/` on start-up. Run `docker compose restart kestra`, wait until healthy, reload the page. The file name must start with `main_` (Kestra takes the tenant from it). |
 | A task fails with `No such image: deng-f1-code:local` | Step 4 was skipped: run `docker compose build code`. |
 | A task fails with a mount error, or the flow succeeds but the repo's `data/raw` stays empty | `HOST_DATA_DIR` in `.env` is wrong (Docker then creates that folder elsewhere and stores the files there). It must be the absolute path of the repo's `data/` folder, with `/` (also on Windows). Fix it, run `docker compose up -d --wait`, and execute the flow again. |
-| `check_source` fails with `OpenF1 access denied: Live F1 session in progress` | OpenF1 blocks everything while an F1 session is live. Kestra retries for about 35 minutes; otherwise Restart the execution after the session has ended. |
-| `fetch` fails with `N sessions failed, re-run to resume` | The API was overloaded or offline. Kestra already retried 4 times. Restart the execution later; finished sessions are skipped. |
+| `check_source` fails with `OpenF1 access denied: Live F1 session in progress` | OpenF1 blocks everything while an F1 session is live. Kestra retries for about 2 h 45 min (15, 30, 60, 60 min); otherwise Restart the execution after the session has ended. |
+| `fetch` fails with `N sessions failed, re-run to resume` | The API was overloaded or offline. Kestra already tried 4 times. Restart the execution later; finished sessions are skipped. |
 | `validate` fails | A data check failed (the log says which). The data stays in the database for investigation. Please open an issue with the log. |
 | `no space left on device` | The full history needs about 20 GB. Free disk space (or increase Docker Desktop's disk limit under *Settings → Resources*), then Restart the execution. |
 
@@ -427,7 +427,7 @@ SELECT * FROM marts.mart_safety_car_risk     WHERE circuit_short_name = 'Singapo
 
 ## 8. Orchestration, reruns and backfills
 
-Kestra ([`orchestration/flows/f1_race_weekend.yaml`](orchestration/flows/f1_race_weekend.yaml))
+Kestra ([`orchestration/flows/main_f1_race_weekend.yaml`](orchestration/flows/main_f1_race_weekend.yaml))
 only schedules, orders, retries and shows the steps. **Idempotency lives in the scripts**,
 so every way of running the flow again is safe:
 
@@ -440,8 +440,10 @@ so every way of running the flow again is safe:
 | Re-download a race (suspected bad data) | **Execute** with `force` = on | new `_SUCCESS` marker → the session is reloaded |
 | Two runs at once | they queue (`concurrency: limit 1`) | they never write the same files or rows at the same time |
 
-The flow file is imported automatically by the `kestra-flows` service on
-`docker compose up`. After editing it, run `docker compose restart kestra-flows`.
+Kestra watches `orchestration/flows/` (mounted to `/flows`, see
+[`orchestration/application.yaml`](orchestration/application.yaml)): the flow is created on
+start-up and updated within seconds whenever the file is saved. The file name must start
+with `main_`, because Kestra 1.3 takes the tenant from the part before the first `_`.
 
 ## 9. Architecture v0.2
 
@@ -489,7 +491,6 @@ flowchart LR
 | `pgadmin` | browser UI for the database, http://localhost:8085 |
 | `kestra` | orchestrator UI and scheduler, http://localhost:8080; starts each task as a container through the Docker socket |
 | `kestra-postgres` | Kestra's own metadata (flows, executions, logs), separate from the F1 data |
-| `kestra-flows` | imports `orchestration/flows/*.yaml` into Kestra on start-up |
 | `code` | the pipeline image `deng-f1-code:local`, used for Kestra's tasks and for `docker compose run` |
 
 `postgres`, `kestra-postgres` and `kestra` restart automatically with Docker
@@ -513,7 +514,7 @@ Docker. All ports are bound to `127.0.0.1`.
 ├── pyproject.toml, uv.lock   Python dependencies (installed in the image with uv)
 ├── orchestration/
 │   ├── application.yaml      Kestra server configuration (mounted into the kestra container)
-│   └── flows/                Kestra flow f1_race_weekend.yaml
+│   └── flows/                Kestra flow main_f1_race_weekend.yaml
 ├── scripts/                  one entry point per pipeline step
 ├── src/                      fetch.py, load.py, transform.py, validate.py
 ├── sql/

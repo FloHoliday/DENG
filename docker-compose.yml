@@ -76,6 +76,8 @@ services:
       # Kestra starts each task as a sibling container on the host's Docker.
       - /var/run/docker.sock:/var/run/docker.sock
       - ./orchestration/application.yaml:/etc/kestra/application.yaml:ro
+      # Kestra watches this folder and syncs every flow file into its database.
+      - ./orchestration/flows:/flows:ro
     environment:
       # Secrets for application.yaml: Kestra fills in its ${...} from these.
       KESTRA_DB_PASSWORD: ${KESTRA_DB_PASSWORD:?Set KESTRA_DB_PASSWORD in .env}
@@ -95,31 +97,6 @@ services:
       start_period: 20s
     depends_on:
       kestra-postgres:
-        condition: service_healthy
-
-  # Imports every flow in orchestration/flows into Kestra once it is up, so nothing has to
-  # be created in the UI. Import overwrites existing flows, so rerunning it is safe:
-  # `docker compose restart kestra-flows` re-imports after editing a flow file.
-  # (Kestra's own --flow-path loader runs before the plugins are loaded in 1.3.)
-  kestra-flows:
-    image: curlimages/curl:8.22.0
-    volumes:
-      - ./orchestration/flows:/flows:ro
-    environment:
-      KESTRA_USER: ${KESTRA_USER:?Set KESTRA_USER in .env}
-      KESTRA_PASSWORD: ${KESTRA_PASSWORD:?Set KESTRA_PASSWORD in .env}
-    entrypoint: ["sh", "-c"]
-    command:
-      - |
-        for f in /flows/*.yaml; do
-          echo "import $$f"
-          curl -fsS -u "$$KESTRA_USER:$$KESTRA_PASSWORD" -F fileUpload=@$$f http://kestra:8080/api/v1/main/flows/import || exit 1
-          echo
-        done
-        # Stay idle, so `docker compose up --wait` doesn't report the finished import as an error.
-        exec tail -f /dev/null
-    depends_on:
-      kestra:
         condition: service_healthy
 
 volumes:
