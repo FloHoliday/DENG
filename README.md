@@ -373,7 +373,7 @@ gives the same result and a changed definition is picked up automatically.
 |---|---|---|
 | `fct_neutralisation` | one Safety Car / VSC / red-flag period | start/end lap and time, from race control messages |
 | `fct_lap` | (session, driver, lap) | lap time, compound, tyre age, pit in/out, neutralised, weather, fuel-corrected lap time, `is_clean_lap` |
-| `fct_lap_position` | (session, driver, lap) | position at the end of each lap |
+| `fct_lap_position` | (session, driver, lap) | position at the end of each lap (order of crossing the line, unique per lap) |
 | `fct_lap_telemetry` | (session, driver, lap) | top speed, slow-corner speed (10th percentile), % full throttle, braking events, lift-and-coast seconds |
 | `fct_stint` | (session, driver, stint) | compound, length, clean laps, degradation (s/lap), grip loss (km/h/lap) |
 | `fct_pit_stop` | (session, driver, in-lap) | lane time, stationary time, under neutralisation, red flag, penalty, `is_real_stop`, compounds before/after, pit loss |

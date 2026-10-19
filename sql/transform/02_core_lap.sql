@@ -5,18 +5,40 @@ CREATE SCHEMA IF NOT EXISTS core;
 -- One row per Safety Car, VSC or red-flag period. A period lasts from its start
 -- message until the next start/end message of that race (lap numbers are the leader's).
 CREATE MATERIALIZED VIEW core.fct_neutralisation AS
-WITH events AS (
-    SELECT
+-- Race control can send a message twice: keep one per (race, event, time) ...
+WITH distinct_events AS (
+    SELECT DISTINCT ON (rc.session_key, rc.event, rc.date)
         rc.session_key,
         rc.date,
         rc.lap_number,
-        rc.event,
-        lead(rc.lap_number) OVER w AS next_lap,
-        lead(rc.date) OVER w AS next_date
+        rc.event
     FROM staging.stg_race_control AS rc
     JOIN staging.stg_sessions AS s USING (session_key)
     WHERE s.is_race AND rc.event IS NOT NULL
-    WINDOW w AS (PARTITION BY rc.session_key ORDER BY rc.date, rc.event)
+    ORDER BY rc.session_key, rc.event, rc.date, rc.lap_number
+),
+-- ... and drop a repeat of the previous event (e.g. SC deployed twice in a row), which
+-- would otherwise start a second, overlapping period.
+first_events AS (
+    SELECT *
+    FROM (
+        SELECT
+            *,
+            lag(event) OVER (PARTITION BY session_key ORDER BY date, event) AS prev_event
+        FROM distinct_events
+    ) AS e
+    WHERE prev_event IS DISTINCT FROM event
+),
+events AS (
+    SELECT
+        session_key,
+        date,
+        lap_number,
+        event,
+        lead(lap_number) OVER w AS next_lap,
+        lead(date) OVER w AS next_date
+    FROM first_events
+    WINDOW w AS (PARTITION BY session_key ORDER BY date, event)
 )
 SELECT
     session_key,
@@ -164,19 +186,16 @@ SELECT
     l.session_key,
     l.driver_number,
     l.lap_number,
-    p.position,
+    -- Order in which the cars crossed the line to complete this lap. Unique by
+    -- construction (the position feed can give two cars the same position, because
+    -- they finish the lap at different times); lapped cars cross later, so rank behind.
+    row_number() OVER (
+        PARTITION BY l.session_key, l.lap_number ORDER BY l.date_end, l.driver_number
+    ) AS position,
     l.is_pit_in_lap,
     l.is_pit_out_lap,
     l.is_neutralised
 FROM core.fct_lap AS l
-JOIN LATERAL (
-    SELECT p.position FROM staging.stg_position AS p
-    WHERE p.session_key = l.session_key
-      AND p.driver_number = l.driver_number
-      AND p.date <= l.date_end
-    ORDER BY p.date DESC
-    LIMIT 1
-) AS p ON true
 WHERE l.date_end IS NOT NULL;
 
 CREATE UNIQUE INDEX ON core.fct_lap_position (session_key, driver_number, lap_number);
