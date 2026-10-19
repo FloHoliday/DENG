@@ -82,6 +82,22 @@ SELECT 'every lap is assigned to a stint (max 1 percent missing)',
 FROM core.fct_lap
 
 UNION ALL
+-- Every served drive-through or stop-and-go penalty must be matched to a pit record,
+-- otherwise it would be counted as a real stop.
+SELECT 'every served drive-through penalty is matched to a pit record', count(*),
+       string_agg(DISTINCT rc.session_key::text, ', ')
+FROM staging.stg_race_control AS rc
+JOIN staging.stg_sessions AS s USING (session_key)
+WHERE s.is_race
+  AND rc.message ~ 'PENALTY SERVED - (DRIVE THROUGH|STOP AND GO|STOP/GO)'
+  AND NOT EXISTS (
+      SELECT 1 FROM core.fct_pit_stop AS p
+      WHERE p.session_key = rc.session_key
+        AND p.is_penalty
+        AND p.driver_number = substring(rc.message FROM 'CAR ([0-9]+)')::integer
+  )
+
+UNION ALL
 SELECT 'every mart has rows', count(*) FILTER (WHERE n = 0),
        string_agg(mart, ', ') FILTER (WHERE n = 0)
 FROM mart_rows;

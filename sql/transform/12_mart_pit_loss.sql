@@ -1,6 +1,7 @@
 -- Mart 3: what does a pit stop cost at a circuit, and when do teams usually stop?
--- Grain: (circuit_short_name, season). Pit loss uses green-flag stops only, because a
--- stop under Safety Car or VSC costs much less.
+-- Grain: (circuit_short_name, season). Only real stops count (no penalties, no red-flag
+-- pit lane). Pit loss uses green-flag stops only, because a stop under Safety Car or VSC
+-- costs much less.
 CREATE MATERIALIZED VIEW marts.mart_pit_loss AS
 SELECT
     circuit_short_name,
@@ -18,6 +19,7 @@ SELECT
     round(count(*)::numeric / count(DISTINCT (session_key, driver_number)), 2)
         AS avg_stops_per_driver
 FROM core.fct_pit_stop
+WHERE is_real_stop
 GROUP BY circuit_short_name, season;
 
 CREATE UNIQUE INDEX ON marts.mart_pit_loss (circuit_short_name, season);

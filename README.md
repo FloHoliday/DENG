@@ -137,7 +137,7 @@ docker compose down -v     # delete everything incl. the database (data/raw stay
 ### 2.1 Kestra
 
 The execution of `f1_race_weekend` is **SUCCESS** and all five tasks are green. The
-`validate` task's log ends with `11 of 11 checks passed`.
+`validate` task's log ends with `12 of 12 checks passed`.
 
 ### 2.2 Run the checks yourself
 
@@ -158,8 +158,9 @@ PASS  telemetry is up to date for every loaded race
 PASS  stint compound is a known value
 PASS  tyre age is never negative
 PASS  every lap is assigned to a stint (max 1 percent missing)
+PASS  every served drive-through penalty is matched to a pit record
 PASS  every mart has rows
-11 of 11 checks passed
+12 of 12 checks passed
 ```
 
 The SQL checks are in [`sql/verify.sql`](sql/verify.sql); you can also paste that file
@@ -375,7 +376,7 @@ gives the same result and a changed definition is picked up automatically.
 | `fct_lap_position` | (session, driver, lap) | position at the end of each lap |
 | `fct_lap_telemetry` | (session, driver, lap) | top speed, slow-corner speed (10th percentile), % full throttle, braking events, lift-and-coast seconds |
 | `fct_stint` | (session, driver, stint) | compound, length, clean laps, degradation (s/lap), grip loss (km/h/lap) |
-| `fct_pit_stop` | (session, driver, in-lap) | lane time, stationary time, under neutralisation, compounds before/after, pit loss |
+| `fct_pit_stop` | (session, driver, in-lap) | lane time, stationary time, under neutralisation, red flag, penalty, `is_real_stop`, compounds before/after, pit loss |
 | `fct_race_result` | (session, driver) | grid, finish, positions gained, number of stops, strategy (e.g. `M-H`) |
 | `fct_on_track_pass` | (session, lap, passing driver, passed driver) | position swaps under green flag, without pit laps |
 | `fct_undercut_attempt` | (session, driver, lap) | car directly behind pits first, the car ahead pits 1-3 laps later; success if ahead afterwards |
@@ -391,6 +392,11 @@ gives the same result and a changed definition is picked up automatically.
   [Michelin Simulation, "Showing our sensitive side" (2018)](https://simulation.michelin.com/canopy/technical-articles/showing-our-sensitive-side)
   (0.03 s per additional kg) and [TracingInsights](https://github.com/TracingInsights/2026)
   (same formula with 100 kg and linear burn).
+- Fake pit stops: not every pit record is a stop. `is_red_flag` marks cars waiting in the
+  pit lane during a red flag (20 to 40 min lane time), `is_penalty` a drive-through or
+  stop-and-go, matched by race control's "PENALTY SERVED" message. Stop numbers, pit loss
+  and undercuts only use `is_real_stop`. The stint data is not used for this: OpenF1 also
+  starts a new stint after a penalty or red flag and misses some real stops.
 - Degradation per stint = slope of fuel-corrected lap time over tyre age (clean laps
   only, at least 5). Marts use the **median of stint slopes**, so every driver is only
   compared with themselves.
@@ -533,6 +539,10 @@ Docker. All ports are bound to `127.0.0.1`.
 - On-track passes are derived from lap-end positions: a car that passes and is passed
   back within the same lap is not counted.
 - The pit-window rule ignores traffic, track position and the next stint's degradation.
+- A car that drives through the pit lane under Safety Car without changing tyres still
+  counts as a real stop: OpenF1 has no tyre-change flag and its stint data is not
+  reliable enough to detect it. Such stops are excluded from pit loss (neutralised), but
+  not from stop counts.
 - With one race per circuit and season, many marts rest on small samples; the sample
   size is always included (`n_stints`, `n_laps`, `n_races`, ...).
 - Materialized views are fully rebuilt on every run (simple and idempotent, cheap at
