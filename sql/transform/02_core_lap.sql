@@ -179,8 +179,7 @@ LEFT JOIN driver_pace AS dp USING (session_key, driver_number);
 CREATE UNIQUE INDEX ON core.fct_lap (session_key, driver_number, lap_number);
 CREATE INDEX ON core.fct_lap (circuit_short_name, season);
 
--- Grain: (session_key, driver_number, lap_number). Running position at the end of each
--- lap: the last position change before the lap ended.
+-- Grain: (session_key, driver_number, lap_number). Running position at the end of each lap.
 CREATE MATERIALIZED VIEW core.fct_lap_position AS
 SELECT
     l.session_key,
