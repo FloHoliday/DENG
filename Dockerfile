@@ -26,4 +26,3 @@ COPY . /app
 ENV PATH="/app/.venv/bin:$PATH"
 
 ENTRYPOINT ["python"]
-CMD ["scripts/validate.py"]
