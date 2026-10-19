@@ -53,17 +53,7 @@ cp .env.example .env
 
 (Windows PowerShell: `Copy-Item .env.example .env`)
 
-Open `.env` in an editor. **One value must be changed: `HOST_DATA_DIR`**, the absolute
-path of the repo's `data/` folder. Find it with:
-
-| OS | Command (run in the repo folder) | Example result |
-|---|---|---|
-| macOS / Linux | `mkdir -p data && echo "$PWD/data"` | `/Users/anna/DENG/data` |
-| Windows PowerShell | `mkdir -Force data; (Resolve-Path data).Path.Replace('\', '/')` | `C:/Users/anna/DENG/data` |
-
-Paste the result into `.env`, e.g. `HOST_DATA_DIR=/Users/anna/DENG/data`.
-
-The passwords in `.env.example` work as they are. Change them if you like (the Kestra
+`.env` works as it is: nothing has to be changed. The passwords in `.env.example` work as they are. Change them if you like (the Kestra
 password needs 8+ characters with an upper-case letter, a lower-case letter and a digit).
 Never commit `.env`; git ignores it.
 
@@ -73,7 +63,7 @@ Never commit `.env`; git ignores it.
 docker compose config --quiet
 ```
 
-**Expected:** no output. An error like `required variable HOST_DATA_DIR is missing a
+**Expected:** no output. An error like `required variable POSTGRES_PASSWORD is missing a
 value` names the line in `.env` to fix.
 
 ### Step 4: build the pipeline image and start the services
@@ -127,7 +117,7 @@ race weekend of the past week, as long as Docker is running.
 ```sh
 docker compose stop        # stop everything, keep all data
 docker compose up -d --wait  # start again
-docker compose down -v     # delete everything incl. the database (data/raw stays)
+docker compose down -v     # delete everything: database AND downloaded files (2.5 h to re-fetch)
 ```
 
 ---
@@ -217,20 +207,31 @@ FROM marts.mart_overtaking_difficulty WHERE circuit_short_name = 'Singapore';
 
 With the full history loaded, the same queries also return rows for 2023-2025.
 
+### 2.4 Look at the raw files
+
+The raw JSON is stored in the Docker volume `deng_raw_data`, not in the repo folder (a
+volume works the same on macOS, Linux and Windows). List or copy it with:
+
+```sh
+# list the files of 2026
+docker compose run --rm --entrypoint ls code -R data/raw/2026
+# copy everything into the folder raw-copy/ (rarely needed)
+docker run --rm -v deng_raw_data:/from -v "$PWD/raw-copy:/to" deng-f1-code:local -c "import shutil; shutil.copytree('/from', '/to', dirs_exist_ok=True)"
+```
+
 ---
 
 ## 3. Troubleshooting
 
 | Problem | Cause and fix |
 |---|---|
-| `required variable HOST_DATA_DIR is missing a value` (or another variable) | `.env` is missing or incomplete. Run step 2 again and compare with `.env.example`. |
+| `required variable POSTGRES_PASSWORD is missing a value` (or another variable) | `.env` is missing or incomplete. Run step 2 again and compare with `.env.example`. |
 | `Bind for 127.0.0.1:8080 failed: port is already allocated` (or `8085`) | Another program or Docker stack uses the port, e.g. the course's Week 5 Kestra. Stop it (`docker ps` shows which container, then `docker stop <name>`), or set `KESTRA_PORT=8081` / `PGADMIN_PORT=8086` in `.env` and open that port instead. |
 | `Cannot connect to the Docker daemon` / `docker: command not found` | Docker Desktop is not running. Start it and wait until it says *running*. |
 | http://localhost:8080 does not load | Kestra needs about 30 s after starting. Check `docker compose ps`: `deng-kestra-1` must be `healthy`. If the containers are gone (Docker restarted), run `docker compose up -d --wait`. |
 | Kestra login fails | Use exactly `KESTRA_USER` / `KESTRA_PASSWORD` from your `.env`. If you changed them after the first start, run `docker compose up -d --wait` again. |
 | Flow `f1_race_weekend` is not listed in Kestra | Kestra syncs it from `orchestration/flows/` on start-up. Run `docker compose restart kestra`, wait until healthy, reload the page. The file name must start with `main_` (Kestra takes the tenant from it). |
 | A task fails with `No such image: deng-f1-code:local` | Step 4 was skipped: run `docker compose build code`. |
-| A task fails with a mount error, or the flow succeeds but the repo's `data/raw` stays empty | `HOST_DATA_DIR` in `.env` is wrong (Docker then creates that folder elsewhere and stores the files there). It must be the absolute path of the repo's `data/` folder, with `/` (also on Windows). Fix it, run `docker compose up -d --wait`, and execute the flow again. |
 | `check_source` fails with `OpenF1 access denied: Live F1 session in progress` | OpenF1 blocks everything while an F1 session is live. Kestra retries for about 2 h 45 min (15, 30, 60, 60 min); otherwise Restart the execution after the session has ended. |
 | `fetch` fails with `N sessions failed, re-run to resume` | The API was overloaded or offline. Kestra already tried 4 times. Restart the execution later; finished sessions are skipped. |
 | `validate` fails | A data check failed (the log says which). The data stays in the database for investigation. Please open an issue with the log. |
@@ -295,7 +296,7 @@ container from the project image; the logic lives in [`src/`](src).
 | # | Task | Script | What it does | Fails when | Retry |
 |---|---|---|---|---|---|
 | 1 | `check_source` | `check_source.py --since DATE` | Asks OpenF1 for finished race weekends since `DATE` and lists them | API down or locked by a live session | yes |
-| 2 | `fetch` | `fetch.py --since DATE [--force]` | Downloads every endpoint of each Race into `data/raw/<year>/<meeting>/<session>/`, unchanged JSON | any session incomplete | yes |
+| 2 | `fetch` | `fetch.py --since DATE [--force]` | Downloads every endpoint of each Race into `data/raw/<year>/<meeting>/<session>/` (in the Docker volume `deng_raw_data`), unchanged JSON | any session incomplete | yes |
 | 3 | `load` | `load.py` | Loads every complete session into typed tables in schema `public` | wrong type, unknown field, row-count mismatch | no |
 | 4 | `transform` | `transform.py [--full-refresh]` | Rebuilds the `staging`, `core` and `marts` models from [`sql/transform/`](sql/transform) | SQL error, duplicate key on a model's grain | no |
 | 5 | `validate` | `validate.py` | Runs the checks in [`sql/verify.sql`](sql/verify.sql) plus raw-files-vs-database | any check fails | no |
@@ -467,7 +468,7 @@ flowchart LR
         check --> fetch --> load --> transform --> validate
     end
 
-    raw[("data/raw<br/>immutable JSON files")]
+    raw[("data/raw<br/>immutable JSON files<br/>volume deng_raw_data")]
     subgraph pg["PostgreSQL (Docker Compose)"]
         public[("public<br/>typed raw tables")]
         staging[("staging<br/>views")]
@@ -521,8 +522,10 @@ Docker. All ports are bound to `127.0.0.1`.
 │   ├── schema.sql            raw tables (load step)
 │   ├── transform/            staging, core and mart models, run in name order
 │   └── verify.sql            data checks (validate step)
-└── data/raw/                 downloaded JSON (gitignored)
 ```
+
+The downloaded raw JSON is not in the repo folder: it lives in the Docker volume
+`deng_raw_data` (see 2.4).
 
 ## 11. Limitations
 

@@ -41,7 +41,7 @@ services:
       POSTGRES_USER: ${POSTGRES_USER:?Set POSTGRES_USER in .env}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
     volumes:
-      - ./data:/app/data
+      - raw_data:/app/data
     depends_on:
       postgres:
         condition: service_healthy
@@ -78,14 +78,15 @@ services:
       - ./orchestration/application.yaml:/etc/kestra/application.yaml:ro
       # Kestra watches this folder and syncs every flow file into its database.
       - ./orchestration/flows:/flows:ro
+      # Not used by Kestra itself: mounting it makes `docker compose up` create the
+      # volume, which the task containers then mount by name.
+      - raw_data:/raw_data:ro
     environment:
       # Secrets for application.yaml: Kestra fills in its ${...} from these.
       KESTRA_DB_PASSWORD: ${KESTRA_DB_PASSWORD:?Set KESTRA_DB_PASSWORD in .env}
       KESTRA_LOGIN_USER: ${KESTRA_USER:?Set KESTRA_USER in .env}
       KESTRA_LOGIN_PASSWORD: ${KESTRA_PASSWORD:?Set KESTRA_PASSWORD in .env}
       # ENV_* variables are available in flows as {{ envs.* }}.
-      # Absolute host path of data/: task containers mount it from the host's Docker.
-      ENV_HOST_DATA_DIR: ${HOST_DATA_DIR:?Set HOST_DATA_DIR in .env}
       ENV_POSTGRES_DB: ${POSTGRES_DB:?Set POSTGRES_DB in .env}
       ENV_POSTGRES_USER: ${POSTGRES_USER:?Set POSTGRES_USER in .env}
       ENV_POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
@@ -100,6 +101,10 @@ services:
         condition: service_healthy
 
 volumes:
+  # Raw JSON files (data/raw). A named volume, not a host folder: Kestra's task containers
+  # mount it by this fixed name, which works the same on macOS, Linux and Windows.
+  raw_data:
+    name: deng_raw_data
   postgres_data:
   pgadmin_data:
   kestra_postgres_data:

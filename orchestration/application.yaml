@@ -32,7 +32,7 @@ kestra:
       basePath: /app/storage
   plugins:
     configurations:
-      # Allows the flow to mount data/ into the task container.
+      # Allows the flow to mount the raw-data volume into the task container.
       - type: io.kestra.plugin.scripts.runner.docker.Docker
         values:
           volume-enabled: true

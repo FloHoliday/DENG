@@ -41,7 +41,7 @@ triggers:
     timezone: Europe/Zurich
 
 # Shared by all five tasks: each runs one script in the project image, in its own
-# container on the compose network, with data/ mounted from the host.
+# container on the compose network, with the raw-data volume mounted to /app/data.
 pluginDefaults:
   - type: io.kestra.plugin.scripts.shell.Commands
     values:
@@ -51,7 +51,7 @@ pluginDefaults:
         pullPolicy: NEVER  # built locally with `docker compose build code`
         networkMode: deng_default
         volumes:
-          - "{{ envs.host_data_dir }}:/app/data"
+          - "deng_raw_data:/app/data"  # named volume from docker-compose.yml
       env:
         POSTGRES_HOST: postgres
         POSTGRES_DB: "{{ envs.postgres_db }}"
