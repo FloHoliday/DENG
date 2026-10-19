@@ -1,4 +1,4 @@
--- Core models per stint, pit stop, driver result, pass and undercut attempt.
+-- Core models per stint, pit stop, driver result, position swap and undercut attempt.
 
 -- Grain: (session_key, driver_number, stint_number).
 CREATE MATERIALIZED VIEW core.fct_stint AS
@@ -191,16 +191,24 @@ WHERE s.is_race;
 
 CREATE UNIQUE INDEX ON core.fct_race_result (session_key, driver_number);
 
--- Grain: (session_key, lap_number, passing_driver, passed_driver).
--- An on-track pass: A was behind B at the end of the previous lap and ahead of B at the
--- end of this lap, under green flag, and neither car was on an in- or out-lap.
--- Not lap 1 (start positions) and only cars that both completed the lap.
-CREATE MATERIALIZED VIEW core.fct_on_track_pass AS
+-- Grain: (session_key, lap_number, gaining_driver, losing_driver).
+-- Every swap of two cars between the end of the previous lap and the end of this lap
+-- (both completed both laps; lap 1 is the start, see mart_race_outcome), with its cause:
+--   pit:         one of the two cars was on a pit in- or out-lap
+--   neutralised: no pit, but the lap was under Safety Car, VSC or red flag
+--   on_track:    a real overtake under green flag
+CREATE MATERIALIZED VIEW core.fct_position_swap AS
 SELECT
     a.session_key,
     a.lap_number,
-    a.driver_number AS passing_driver,
-    b.driver_number AS passed_driver
+    a.driver_number AS gaining_driver,
+    b.driver_number AS losing_driver,
+    CASE
+        WHEN a.is_pit_in_lap OR a.is_pit_out_lap OR b.is_pit_in_lap OR b.is_pit_out_lap
+            THEN 'pit'
+        WHEN a.is_neutralised OR b.is_neutralised THEN 'neutralised'
+        ELSE 'on_track'
+    END AS cause
 FROM core.fct_lap_position AS a
 JOIN core.fct_lap_position AS a_prev
     ON a_prev.session_key = a.session_key
@@ -216,11 +224,9 @@ JOIN core.fct_lap_position AS b_prev
    AND b_prev.lap_number = b.lap_number - 1
 WHERE a.lap_number > 1
   AND a_prev.position > b_prev.position
-  AND a.position < b.position
-  AND NOT (a.is_neutralised OR a.is_pit_in_lap OR a.is_pit_out_lap)
-  AND NOT (b.is_pit_in_lap OR b.is_pit_out_lap);
+  AND a.position < b.position;
 
-CREATE UNIQUE INDEX ON core.fct_on_track_pass (session_key, lap_number, passing_driver, passed_driver);
+CREATE UNIQUE INDEX ON core.fct_position_swap (session_key, lap_number, gaining_driver, losing_driver);
 
 -- Grain: (session_key, driver_number, lap_number) of the attacker's green-flag stop.
 -- Undercut attempt: A is directly behind B at the end of the lap before A's stop, and B

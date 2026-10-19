@@ -3,9 +3,10 @@
 DENG HS26 - Florian Item & Florian Leimer
 
 A batch pipeline that loads Formula 1 race data from the [OpenF1 API](https://openf1.org/docs/)
-into PostgreSQL and turns it into tables a race strategist can query: which strategies
-work at a circuit, how fast tyres degrade, what a pit stop costs, how likely a Safety Car
-is and how hard it is to overtake. Kestra runs it every Monday after a race weekend.
+into PostgreSQL and answers one question for a race strategist: **how do tyre and pit
+strategy and on-track position changes decide race outcomes?** Every driver's result is
+split into the positions won or lost at the start, on track, in the pits and otherwise.
+Kestra runs it every Monday after a race weekend.
 
 **Contents**
 
@@ -127,7 +128,7 @@ docker compose down -v     # delete everything: database AND downloaded files (2
 ### 2.1 Kestra
 
 The execution of `f1_race_weekend` is **SUCCESS** and all five tasks are green. The
-`validate` task's log ends with `12 of 12 checks passed`.
+`validate` task's log ends with `13 of 13 checks passed`.
 
 ### 2.2 Run the checks yourself
 
@@ -149,8 +150,9 @@ PASS  stint compound is a known value
 PASS  tyre age is never negative
 PASS  every lap is assigned to a stint (max 1 percent missing)
 PASS  every served drive-through penalty is matched to a pit record
-PASS  every mart has rows
-12 of 12 checks passed
+PASS  every loaded race is in mart_race_outcome
+PASS  race outcome split adds up to positions gained
+13 of 13 checks passed
 ```
 
 The SQL checks are in [`sql/verify.sql`](sql/verify.sql); you can also paste that file
@@ -168,8 +170,8 @@ Or use **pgAdmin** at **http://localhost:8085** (log in with `PGADMIN_DEFAULT_EM
 `PGADMIN_DEFAULT_PASSWORD`), then **Servers → Register → Server**: name `F1`, tab
 *Connection*: host `postgres`, port `5432`, database/user/password from your `.env`.
 
-The strategist tables are in schema `marts`, which is the default: `SELECT * FROM
-mart_pit_loss` works without a prefix. Raw tables must be named with their schema, e.g.
+The strategist table is in schema `marts`, which is the default: `SELECT * FROM
+mart_race_outcome` works without a prefix. Raw tables must be named with their schema, e.g.
 `raw.laps`.
 
 **Reference race: 2026 Singapore Grand Prix** (`session_key = 11388`). These numbers are
@@ -191,25 +193,25 @@ UNION ALL SELECT 'car_data', count(*) FROM raw.car_data WHERE session_key = 1138
 | intervals | 28131 |
 | car_data | 799898 |
 
-What does a pit stop cost in Singapore, and how hard is it to overtake there?
+Where were positions won and lost in Singapore? Sum of positions moved per cause, over
+all classified finishers:
 
 ```sql
-SELECT circuit_short_name, season, n_green_stops, median_pit_loss_s, median_first_stop_lap
-FROM marts.mart_pit_loss WHERE circuit_short_name = 'Singapore';
-
-SELECT circuit_short_name, season, avg_on_track_passes, grid_finish_correlation
-FROM marts.mart_overtaking_difficulty WHERE circuit_short_name = 'Singapore';
+SELECT circuit_short_name, season,
+       sum(abs(gained_lap1))     AS moved_lap1,
+       sum(abs(gained_on_track)) AS moved_on_track,
+       sum(abs(gained_in_pits))  AS moved_in_pits,
+       sum(abs(gained_other))    AS moved_other
+FROM mart_race_outcome
+WHERE circuit_short_name = 'Singapore'
+GROUP BY circuit_short_name, season;
 ```
 
-| circuit_short_name | season | n_green_stops | median_pit_loss_s | median_first_stop_lap |
-|---|---|---|---|---|
-| Singapore | 2026 | 21 | 24.1 | 29.5 |
+| circuit_short_name | season | moved_lap1 | moved_on_track | moved_in_pits | moved_other |
+|---|---|---|---|---|---|
+| Singapore | 2026 | 22 | 40 | 11 | 10 |
 
-| circuit_short_name | season | avg_on_track_passes | grid_finish_correlation |
-|---|---|---|---|
-| Singapore | 2026 | 28.0 | 0.75 |
-
-With the full history loaded, the same queries also return rows for 2023-2025.
+With the full history loaded, the same query also returns rows for 2023-2025.
 
 ### 2.4 Look at the raw files
 
@@ -250,16 +252,14 @@ analyst) who prepares the next race weekend and reviews the last one.
 
 **Problem:** raw lap-by-lap and telemetry data is too granular and too large to reason
 about directly. The strategist needs curated tables, filterable by **circuit** (what to
-expect at the next race) and **season** (trends), that answer:
+expect at the next race) and **season** (trends), that answer the question from the pitch:
 
-1. How does each tyre compound degrade over a stint, and from which tyre age does a pit
-   stop pay off?
-2. How hard is it to overtake at this circuit, and how much did grid position, race pace
-   and strategy decide the result?
-3. How likely is a Safety Car (a cheap pit stop), and when?
+> How do tyre and pit strategy and on-track position changes actually decide race outcomes?
 
-**Data product:** the marts in schema `marts` (see [Data models](#7-data-models-transformation)),
-built on lap-, stint- and pit-stop-level fact tables in schema `core`.
+**Data product:** `marts.mart_race_outcome`, one row per driver per race (see
+[Data models](#7-data-models-transformation)), built on lap-, stint-, pit-stop- and
+result-level fact tables in schema `core`. The core tables (one row per driver per lap,
+stint, stop or race) also serve a possible ML use case.
 
 ## 5. Data source
 
@@ -383,7 +383,7 @@ gives the same result and a changed definition is picked up automatically.
 | `fct_stint` | (session, driver, stint) | compound, length, clean laps, degradation (s/lap), grip loss (km/h/lap) |
 | `fct_pit_stop` | (session, driver, in-lap) | lane time, stationary time, under neutralisation, red flag, penalty, `is_real_stop`, compounds before/after, pit loss |
 | `fct_race_result` | (session, driver) | grid, finish, positions gained, number of stops, strategy (e.g. `M-H`) |
-| `fct_on_track_pass` | (session, lap, passing driver, passed driver) | position swaps under green flag, without pit laps |
+| `fct_position_swap` | (session, lap, gaining driver, losing driver) | every swap of two cars from one lap end to the next, with its cause: `on_track`, `pit` or `neutralised` |
 | `fct_undercut_attempt` | (session, driver, lap) | car directly behind pits first, the car ahead pits 1-3 laps later; success if ahead afterwards |
 
 **Cleaning rules (and why):**
@@ -403,31 +403,36 @@ gives the same result and a changed definition is picked up automatically.
   and undercuts only use `is_real_stop`. The stint data is not used for this: OpenF1 also
   starts a new stint after a penalty or red flag and misses some real stops.
 - Degradation per stint = slope of fuel-corrected lap time over tyre age (clean laps
-  only, at least 5). Marts use the **median of stint slopes**, so every driver is only
-  compared with themselves.
+  only, at least 5), so every driver is only compared with themselves.
 
-### 7.2 Marts (schema `marts`)
+### 7.2 Mart (schema `marts`)
 
-| Mart | Grain | Strategist question |
+`mart_race_outcome`, grain (race, driver). It splits each driver's result,
+`positions_gained = grid - finish`, into four parts that add up exactly (a validate check
+fails the run otherwise); positive = positions won:
+
+| Column | Positions won or lost ... | Built from |
 |---|---|---|
-| `mart_strategy_per_circuit` | circuit, season, strategy | Which strategies were run here and how many positions did they gain? |
-| `mart_safety_car_risk` | circuit (all seasons) | How likely is a Safety Car/VSC/red flag, and from which lap? |
-| `mart_pit_loss` | circuit, season | What does a green-flag stop cost, and when is the first stop? |
-| `mart_overtaking_difficulty` | circuit, season | How many on-track passes, and how strongly does the grid decide the result? |
-| `mart_tyre_degradation` | circuit, season, compound | How many seconds per lap does each compound lose? |
-| `mart_pit_window` | circuit, season, compound | From which tyre age does a stop pay off? (`sqrt(2 * pit_loss / deg)`) |
-| `mart_undercut` | circuit, season | How often does the undercut work here? |
-| `mart_team_tyre_management` | season, team, compound | Which teams degrade less than the field, and who lifts and coasts? |
-| `mart_weather_effect` | season, compound, track temperature band | Does a hotter track increase degradation? |
-| `mart_grip_loss` | circuit, season, compound, tyre age | How much slow-corner speed and lap time does a tyre lose with age (telemetry)? |
-| `mart_circuit_character` | circuit, season | Full throttle %, braking events, top speed: why is a circuit hard on tyres? |
+| `gained_lap1` | at the start and on lap 1 (grid vs. position after lap 1) | `fct_race_result`, `fct_lap_position` |
+| `gained_on_track` | by green-flag overtakes, made minus suffered | `fct_position_swap` (`on_track`) |
+| `gained_in_pits` | by pit stops: own stops cost places, rivals' stops give places | `fct_position_swap` (`pit`) |
+| `gained_other` | under Safety Car/VSC without a stop, when cars ahead retire, across laps missing in the source, and by penalties after the flag | `fct_position_swap` (`neutralised`), `fct_lap_position`, `fct_race_result` |
 
-Example, "preparing the next race at Singapore":
+The split is filled for classified finishers with a grid position (DNF rows keep their
+grid, strategy and stops, but no split). Next to it, what the driver did: `strategy`
+(compound sequence, e.g. `S-M`), `n_stops` and `n_stops_under_neutralisation` (real stops
+only), `green_pit_loss_s`, `avg_deg_s_per_lap`, `longest_stint`, `n_undercut_attempts`,
+`n_undercut_successes`.
+
+Example, "how was the Singapore 2026 result decided for the top 8?":
 
 ```sql
-SELECT * FROM marts.mart_strategy_per_circuit WHERE circuit_short_name = 'Singapore' ORDER BY season, n_drivers DESC;
-SELECT * FROM marts.mart_pit_window          WHERE circuit_short_name = 'Singapore' ORDER BY season, compound;
-SELECT * FROM marts.mart_safety_car_risk     WHERE circuit_short_name = 'Singapore';
+SELECT name_acronym, grid_position, finish_position, gained_lap1, gained_on_track,
+       gained_in_pits, gained_other, strategy, n_stops
+FROM mart_race_outcome
+WHERE circuit_short_name = 'Singapore' AND season = 2026
+ORDER BY finish_position
+LIMIT 8;
 ```
 
 ## 8. Orchestration, reruns and backfills
@@ -544,14 +549,14 @@ The downloaded raw JSON is not in the repo folder: it lives in the Docker volume
   2023-2025 degradation does not transfer 1:1 to 2026.
 - Laps are matched to Safety Car periods by the leader's lap number, and telemetry
   samples to laps by timestamp (from the start of one lap to the start of the next).
-- On-track passes are derived from lap-end positions: a car that passes and is passed
-  back within the same lap is not counted.
-- The pit-window rule ignores traffic, track position and the next stint's degradation.
+- Position changes are derived from lap-end positions: a car that passes and is passed
+  back within the same lap is not counted, and a swap on a lap where one of the two cars
+  pits counts as `pit`, even if it was a real overtake.
 - A car that drives through the pit lane under Safety Car without changing tyres still
   counts as a real stop: OpenF1 has no tyre-change flag and its stint data is not
   reliable enough to detect it. Such stops are excluded from pit loss (neutralised), but
   not from stop counts.
-- With one race per circuit and season, many marts rest on small samples; the sample
-  size is always included (`n_stints`, `n_laps`, `n_races`, ...).
+- With one race per circuit and season, per-circuit conclusions rest on small samples;
+  more seasons (2023-2025) make them more reliable.
 - Materialized views are fully rebuilt on every run (simple and idempotent, cheap at
   this size); only telemetry is incremental.

@@ -61,16 +61,18 @@ WITH race_laps AS (
         s.meeting_key,
         s.circuit_short_name,
         max(l.lap_number) OVER (PARTITION BY l.session_key) AS total_laps,
-        -- End of the lap: start of the driver's next lap, or start + duration on the last.
+        -- End of the lap: start of the driver's next lap, or start + duration on the last
+        -- lap and when the next lap is missing in the source (a few laps are).
         coalesce(
-            lead(l.date_start) OVER (
-                PARTITION BY l.session_key, l.driver_number ORDER BY l.lap_number
-            ),
+            CASE
+                WHEN lead(l.lap_number) OVER w = l.lap_number + 1 THEN lead(l.date_start) OVER w
+            END,
             l.date_start + make_interval(secs => l.lap_duration)
         ) AS date_end
     FROM staging.stg_laps AS l
     JOIN staging.stg_sessions AS s USING (session_key)
     WHERE s.is_race
+    WINDOW w AS (PARTITION BY l.session_key, l.driver_number ORDER BY l.lap_number)
 ),
 enriched AS (
     SELECT

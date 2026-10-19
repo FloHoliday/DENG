@@ -6,19 +6,6 @@ WITH loaded_races AS (
     FROM raw.loaded_sessions AS ls
     JOIN staging.stg_sessions AS s USING (session_key)
     WHERE s.is_race
-),
-mart_rows AS (
-    SELECT 'mart_strategy_per_circuit' AS mart, count(*) AS n FROM marts.mart_strategy_per_circuit
-    UNION ALL SELECT 'mart_safety_car_risk', count(*) FROM marts.mart_safety_car_risk
-    UNION ALL SELECT 'mart_pit_loss', count(*) FROM marts.mart_pit_loss
-    UNION ALL SELECT 'mart_overtaking_difficulty', count(*) FROM marts.mart_overtaking_difficulty
-    UNION ALL SELECT 'mart_weather_effect', count(*) FROM marts.mart_weather_effect
-    UNION ALL SELECT 'mart_tyre_degradation', count(*) FROM marts.mart_tyre_degradation
-    UNION ALL SELECT 'mart_pit_window', count(*) FROM marts.mart_pit_window
-    UNION ALL SELECT 'mart_team_tyre_management', count(*) FROM marts.mart_team_tyre_management
-    UNION ALL SELECT 'mart_undercut', count(*) FROM marts.mart_undercut
-    UNION ALL SELECT 'mart_grip_loss', count(*) FROM marts.mart_grip_loss
-    UNION ALL SELECT 'mart_circuit_character', count(*) FROM marts.mart_circuit_character
 )
 
 SELECT 'raw laps: one row per (session, driver, lap)' AS check, count(*) AS failures,
@@ -98,6 +85,15 @@ WHERE s.is_race
   )
 
 UNION ALL
-SELECT 'every mart has rows', count(*) FILTER (WHERE n = 0),
-       string_agg(mart, ', ') FILTER (WHERE n = 0)
-FROM mart_rows;
+SELECT 'every loaded race is in mart_race_outcome', count(*), string_agg(r.session_key::text, ', ')
+FROM loaded_races AS r
+WHERE NOT EXISTS (SELECT 1 FROM marts.mart_race_outcome AS m WHERE m.session_key = r.session_key)
+
+UNION ALL
+-- The four parts must add up to the result; otherwise a position change is counted
+-- twice or missed, and the split cannot be explained.
+SELECT 'race outcome split adds up to positions gained', count(*),
+       string_agg(DISTINCT session_key || '/' || driver_number, ', ')
+FROM marts.mart_race_outcome
+WHERE gained_lap1 IS NOT NULL
+  AND gained_lap1 + gained_on_track + gained_in_pits + gained_other <> positions_gained;

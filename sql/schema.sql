@@ -214,7 +214,7 @@ CREATE TABLE IF NOT EXISTS raw.loaded_sessions (
 );
 
 -- Unqualified names resolve to marts first, so a strategist can write
--- `SELECT * FROM mart_pit_loss`. Raw tables must be named explicitly (raw.laps).
+-- `SELECT * FROM mart_race_outcome`. Raw tables must be named explicitly (raw.laps).
 -- Applies to new connections.
 DO $$
 BEGIN
