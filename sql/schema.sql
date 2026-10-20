@@ -1,6 +1,9 @@
 -- Store step: one typed column per OpenF1 field (schema-on-write). A new, renamed or
 -- wrongly typed field fails the session's load instead of slipping into the table.
-CREATE TABLE IF NOT EXISTS public.meetings (
+-- Raw tables live in schema raw; the strategist works in marts (see the end of this file).
+CREATE SCHEMA IF NOT EXISTS raw;
+
+CREATE TABLE IF NOT EXISTS raw.meetings (
     circuit_key INTEGER,
     circuit_image TEXT,
     circuit_info_url TEXT,
@@ -22,7 +25,7 @@ CREATE TABLE IF NOT EXISTS public.meetings (
     loaded_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
-CREATE TABLE IF NOT EXISTS public.sessions (
+CREATE TABLE IF NOT EXISTS raw.sessions (
     circuit_key INTEGER,
     circuit_short_name TEXT,
     country_code TEXT,
@@ -42,7 +45,7 @@ CREATE TABLE IF NOT EXISTS public.sessions (
 );
 
 -- One table per endpoint, keyed by the Race session_key the rows were fetched for.
-CREATE TABLE IF NOT EXISTS public.drivers (
+CREATE TABLE IF NOT EXISTS raw.drivers (
     broadcast_name TEXT,
     country_code TEXT, -- deprecated, will be removed at the end of the 2026 season
     driver_number INTEGER NOT NULL,
@@ -58,7 +61,7 @@ CREATE TABLE IF NOT EXISTS public.drivers (
     loaded_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
-CREATE TABLE IF NOT EXISTS public.laps (
+CREATE TABLE IF NOT EXISTS raw.laps (
     date_start TIMESTAMPTZ,
     driver_number INTEGER NOT NULL,
     duration_sector_1 DOUBLE PRECISION,
@@ -78,7 +81,7 @@ CREATE TABLE IF NOT EXISTS public.laps (
     loaded_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
-CREATE TABLE IF NOT EXISTS public.stints (
+CREATE TABLE IF NOT EXISTS raw.stints (
     compound TEXT,
     driver_number INTEGER NOT NULL,
     lap_end INTEGER,
@@ -90,7 +93,7 @@ CREATE TABLE IF NOT EXISTS public.stints (
     loaded_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
-CREATE TABLE IF NOT EXISTS public.pit (
+CREATE TABLE IF NOT EXISTS raw.pit (
     date TIMESTAMPTZ NOT NULL,
     driver_number INTEGER NOT NULL,
     lane_duration DOUBLE PRECISION,
@@ -102,7 +105,7 @@ CREATE TABLE IF NOT EXISTS public.pit (
     loaded_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
-CREATE TABLE IF NOT EXISTS public.position (
+CREATE TABLE IF NOT EXISTS raw.position (
     date TIMESTAMPTZ NOT NULL,
     driver_number INTEGER NOT NULL,
     meeting_key INTEGER NOT NULL,
@@ -111,7 +114,7 @@ CREATE TABLE IF NOT EXISTS public.position (
     loaded_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
-CREATE TABLE IF NOT EXISTS public.race_control (
+CREATE TABLE IF NOT EXISTS raw.race_control (
     category TEXT,
     date TIMESTAMPTZ NOT NULL,
     driver_number INTEGER,
@@ -127,7 +130,7 @@ CREATE TABLE IF NOT EXISTS public.race_control (
 );
 
 -- gap_to_leader / interval are seconds or text like '+1 LAP', so they stay TEXT.
-CREATE TABLE IF NOT EXISTS public.session_result (
+CREATE TABLE IF NOT EXISTS raw.session_result (
     dnf BOOLEAN,
     dns BOOLEAN,
     dsq BOOLEAN,
@@ -142,7 +145,7 @@ CREATE TABLE IF NOT EXISTS public.session_result (
     loaded_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
-CREATE TABLE IF NOT EXISTS public.weather (
+CREATE TABLE IF NOT EXISTS raw.weather (
     air_temperature DOUBLE PRECISION,
     date TIMESTAMPTZ NOT NULL,
     humidity DOUBLE PRECISION,
@@ -156,7 +159,7 @@ CREATE TABLE IF NOT EXISTS public.weather (
     loaded_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
-CREATE TABLE IF NOT EXISTS public.intervals (
+CREATE TABLE IF NOT EXISTS raw.intervals (
     date TIMESTAMPTZ NOT NULL,
     driver_number INTEGER NOT NULL,
     gap_to_leader TEXT,
@@ -167,7 +170,7 @@ CREATE TABLE IF NOT EXISTS public.intervals (
 );
 
 -- session_key is the qualifying session that set the grid, race_session_key the Race.
-CREATE TABLE IF NOT EXISTS public.starting_grid (
+CREATE TABLE IF NOT EXISTS raw.starting_grid (
     driver_number INTEGER NOT NULL,
     lap_duration DOUBLE PRECISION,
     meeting_key INTEGER NOT NULL,
@@ -177,7 +180,7 @@ CREATE TABLE IF NOT EXISTS public.starting_grid (
     loaded_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
-CREATE TABLE IF NOT EXISTS public.car_data (
+CREATE TABLE IF NOT EXISTS raw.car_data (
     brake INTEGER,
     date TIMESTAMPTZ NOT NULL,
     driver_number INTEGER NOT NULL,
@@ -191,21 +194,31 @@ CREATE TABLE IF NOT EXISTS public.car_data (
     loaded_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
-CREATE INDEX IF NOT EXISTS drivers_session_key ON public.drivers (session_key);
-CREATE INDEX IF NOT EXISTS laps_session_key ON public.laps (session_key);
-CREATE INDEX IF NOT EXISTS stints_session_key ON public.stints (session_key);
-CREATE INDEX IF NOT EXISTS pit_session_key ON public.pit (session_key);
-CREATE INDEX IF NOT EXISTS position_session_key ON public.position (session_key);
-CREATE INDEX IF NOT EXISTS race_control_session_key ON public.race_control (session_key);
-CREATE INDEX IF NOT EXISTS session_result_session_key ON public.session_result (session_key);
-CREATE INDEX IF NOT EXISTS weather_session_key ON public.weather (session_key);
-CREATE INDEX IF NOT EXISTS intervals_session_key ON public.intervals (session_key);
-CREATE INDEX IF NOT EXISTS starting_grid_race_session_key ON public.starting_grid (race_session_key);
-CREATE INDEX IF NOT EXISTS car_data_session_key ON public.car_data (session_key);
+CREATE INDEX IF NOT EXISTS drivers_session_key ON raw.drivers (session_key);
+CREATE INDEX IF NOT EXISTS laps_session_key ON raw.laps (session_key);
+CREATE INDEX IF NOT EXISTS stints_session_key ON raw.stints (session_key);
+CREATE INDEX IF NOT EXISTS pit_session_key ON raw.pit (session_key);
+CREATE INDEX IF NOT EXISTS position_session_key ON raw.position (session_key);
+CREATE INDEX IF NOT EXISTS race_control_session_key ON raw.race_control (session_key);
+CREATE INDEX IF NOT EXISTS session_result_session_key ON raw.session_result (session_key);
+CREATE INDEX IF NOT EXISTS weather_session_key ON raw.weather (session_key);
+CREATE INDEX IF NOT EXISTS intervals_session_key ON raw.intervals (session_key);
+CREATE INDEX IF NOT EXISTS starting_grid_race_session_key ON raw.starting_grid (race_session_key);
+CREATE INDEX IF NOT EXISTS car_data_session_key ON raw.car_data (session_key);
 
 -- Which _SUCCESS marker each session was loaded from; a newer marker means reload.
-CREATE TABLE IF NOT EXISTS public.loaded_sessions (
+CREATE TABLE IF NOT EXISTS raw.loaded_sessions (
     session_key INTEGER PRIMARY KEY,
     completed_at TIMESTAMPTZ NOT NULL,
     loaded_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+-- Unqualified names resolve to marts first, so a strategist can write
+-- `SELECT * FROM mart_race_outcome`. Raw tables must be named explicitly (raw.laps).
+-- Applies to new connections.
+DO $$
+BEGIN
+    EXECUTE 'ALTER DATABASE ' || quote_ident(current_database())
+        || ' SET search_path = marts, public';
+END
+$$;

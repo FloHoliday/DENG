@@ -1,0 +1,111 @@
+# Kestra flow: check source → fetch → load → transform → validate.
+# Every step is rerun-safe on its own: complete sessions (_SUCCESS) are not fetched again,
+# each session is replaced in Postgres in one transaction, and the models are rebuilt.
+# So a failed run is fixed with Restart (continues at the failed task) or a new run.
+id: f1_race_weekend
+namespace: deng.f1
+
+description: |
+  Weekly incremental load: every Monday, ingest all race weekends that started in the
+  last 8 days. Manual run: set `since` (the default 2023-01-01 loads the full history).
+  Backfill: Triggers tab → monday_after_race_weekend → Backfill executions.
+
+inputs:
+  - id: since
+    type: DATE
+    defaults: "2023-01-01"
+    description: Manual runs only. Ingest race weekends starting on/after this date.
+  - id: force
+    type: BOOL
+    defaults: false
+    description: Re-fetch files that already exist.
+
+variables:
+  # Scheduled/backfill run: look back 8 days from the scheduled date. Manual run: the input.
+  since: >-
+    {{ trigger.date is defined
+       ? (trigger.date | dateAdd(-8, 'DAYS') | date('yyyy-MM-dd'))
+       : inputs.since }}
+
+# One run at a time: a scheduled run and a manual backfill never write the same files.
+concurrency:
+  limit: 1
+  behavior: QUEUE
+
+triggers:
+  - id: monday_after_race_weekend
+    type: io.kestra.plugin.core.trigger.Schedule
+    # Monday 06:00 Zurich time: no F1 session is live then (OpenF1 returns HTTP 401
+    # for everything during live sessions).
+    cron: "0 6 * * 1"
+    timezone: Europe/Zurich
+
+# Shared by all five tasks: each runs one script in the project image, in its own
+# container on the compose network, with the raw-data volume mounted to /app/data.
+pluginDefaults:
+  - type: io.kestra.plugin.scripts.shell.Commands
+    values:
+      containerImage: deng-f1-code:local
+      taskRunner:
+        type: io.kestra.plugin.scripts.runner.docker.Docker
+        pullPolicy: NEVER  # built locally with `docker compose build code`
+        networkMode: deng_default
+        volumes:
+          - "deng_raw_data:/app/data"  # named volume from docker-compose.yml
+      env:
+        POSTGRES_HOST: postgres
+        POSTGRES_DB: "{{ envs.postgres_db }}"
+        POSTGRES_USER: "{{ envs.postgres_user }}"
+        POSTGRES_PASSWORD: "{{ envs.postgres_password }}"
+
+tasks:
+  # Fails early if OpenF1 is down or locked by a live session.
+  - id: check_source
+    type: io.kestra.plugin.scripts.shell.Commands
+    # Only the two network tasks retry: their failures can be temporary. Load, transform
+    # and validate fail for permanent reasons (bad data, bad SQL), a retry won't help.
+    # An outage or a live session lasts hours, not minutes: wait 15, 30, 60, 60 min
+    # (2h45 in total, longer than a race) before giving up.
+    retry:
+      type: exponential
+      interval: PT15M
+      delayFactor: 2
+      maxInterval: PT1H
+      maxAttempts: 5
+    commands:
+      - cd /app
+      - python scripts/check_source.py --since {{ render(vars.since) }}
+
+  # Fails if any session is incomplete, so nothing half-fetched is loaded.
+  - id: fetch
+    type: io.kestra.plugin.scripts.shell.Commands
+    retry:
+      type: exponential
+      interval: PT5M
+      maxInterval: PT1H
+      maxAttempts: 4
+    commands:
+      - cd /app
+      - >-
+        python scripts/fetch.py
+        --since {{ render(vars.since) }}
+        {{ inputs.force ? '--force' : '' }}
+
+  - id: load
+    type: io.kestra.plugin.scripts.shell.Commands
+    commands:
+      - cd /app
+      - python scripts/load.py
+
+  - id: transform
+    type: io.kestra.plugin.scripts.shell.Commands
+    commands:
+      - cd /app
+      - python scripts/transform.py
+
+  # Fails the execution if a check fails; the loaded data stays for investigation.
+  - id: validate
+    type: io.kestra.plugin.scripts.shell.Commands
+    commands:
+      - cd /app
+      - python scripts/validate.py

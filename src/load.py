@@ -1,8 +1,9 @@
-"""Store step: load the raw JSON of every completed session in data/raw into typed PostgreSQL tables."""
+"""Load step: load the raw JSON of every completed session in data/raw into typed PostgreSQL tables."""
 
 import json
 import os
 import re
+import sys
 from datetime import datetime
 from pathlib import Path
 
@@ -51,7 +52,7 @@ def insert(connection, table: str, rows: list[dict], conflict_key: str | None = 
             raise ValueError(f"{table}: invalid field name {column!r}")
     names = ", ".join(f'"{c}"' for c in columns)
     values = ", ".join(f":{c}" for c in columns)
-    sql = f"INSERT INTO public.{table} ({names}) VALUES ({values})"
+    sql = f"INSERT INTO raw.{table} ({names}) VALUES ({values})"
     if conflict_key:
         updates = ", ".join(f'"{c}" = EXCLUDED."{c}"' for c in columns)
         sql += (
@@ -80,7 +81,7 @@ def load_session(session_dir: UPath, engine) -> int:
         for table in TABLES:
             key = KEY_COLUMNS.get(table, "session_key")
             connection.execute(
-                text(f"DELETE FROM public.{table} WHERE {key} = :k"),
+                text(f"DELETE FROM raw.{table} WHERE {key} = :k"),
                 {"k": session_key},
             )
             for path in table_files(session_dir, table):
@@ -96,7 +97,7 @@ def load_session(session_dir: UPath, engine) -> int:
                 if name.split("/")[0] == table
             )
             actual = connection.scalar(
-                text(f"SELECT COUNT(*) FROM public.{table} WHERE {key} = :k"),
+                text(f"SELECT COUNT(*) FROM raw.{table} WHERE {key} = :k"),
                 {"k": session_key},
             )
             if actual != expected:
@@ -107,7 +108,7 @@ def load_session(session_dir: UPath, engine) -> int:
 
         connection.execute(
             text("""
-                INSERT INTO public.loaded_sessions (session_key, completed_at) VALUES (:k, :c)
+                INSERT INTO raw.loaded_sessions (session_key, completed_at) VALUES (:k, :c)
                 ON CONFLICT (session_key) DO UPDATE
                 SET completed_at = EXCLUDED.completed_at, loaded_at = now()
             """),
@@ -117,18 +118,22 @@ def load_session(session_dir: UPath, engine) -> int:
 
 
 def run(raw_dir: UPath) -> int:
-    """Load every session whose _SUCCESS marker is newer than its last load; returns the number loaded."""
+    """Load every session whose _SUCCESS marker is newer than its last load; returns the number failed.
+
+    A failed session is rolled back and reported; the sessions after it are still loaded.
+    """
     engine = create_engine_from_env()
     try:
         with engine.begin() as connection:
             connection.execute(text(SCHEMA.read_text(encoding="utf-8")))
             loaded_markers = dict(
                 connection.execute(
-                    text("SELECT session_key, completed_at FROM public.loaded_sessions")
+                    text("SELECT session_key, completed_at FROM raw.loaded_sessions")
                 ).fetchall()
             )
 
         count = 0
+        failed = 0
         for marker in sorted(raw_dir.glob("**/_SUCCESS")):
             session_dir = marker.parent
             session_key = int(session_dir.name.split("_")[0])
@@ -136,10 +141,15 @@ def run(raw_dir: UPath) -> int:
             if loaded_markers.get(session_key) == completed_at:
                 print(f"skip  {session_dir} (already loaded)")
                 continue
-            rows = load_session(session_dir, engine)
+            try:
+                rows = load_session(session_dir, engine)
+            except Exception as exc:  # noqa: BLE001 - report every failed session, then fail the step
+                print(f"FAILED {session_dir}: {exc}", file=sys.stderr)
+                failed += 1
+                continue
             print(f"load  {session_dir}: {rows:,} rows")
             count += 1
-        print(f"Loaded {count} sessions into PostgreSQL")
-        return count
+        print(f"Loaded {count} sessions into PostgreSQL, {failed} failed")
+        return failed
     finally:
         engine.dispose()

@@ -1,4 +1,4 @@
-"""Ingest step: fetch the raw OpenF1 data of all race weekends since a date and save it unchanged as JSON."""
+"""Fetch step: fetch the raw OpenF1 data of all race weekends since a date and save it unchanged as JSON."""
 
 import json
 import re
@@ -29,6 +29,9 @@ SESSION_ENDPOINTS = [
     "weather",
     "intervals",
 ]
+# May legitimately be empty: a race without pit stops, a driver who didn't start (no
+# car_data). Every other endpoint must return rows, otherwise the fetch counts as failed.
+MAY_BE_EMPTY = {"pit", "car_data"}
 
 
 def is_retryable(exc: BaseException) -> bool:
@@ -88,13 +91,27 @@ def find_meetings(client: OpenF1Client, since: date) -> list[dict]:
     )
 
 
+def check_source(since: date) -> int:
+    """Check that OpenF1 answers (no live-session lock) and list the race weekends to fetch."""
+    meetings = find_meetings(OpenF1Client(), since)
+    for meeting in meetings:
+        print(
+            f"{meeting['date_start'][:10]}  {meeting['meeting_name']} (meeting_key={meeting['meeting_key']})"
+        )
+    print(f"OpenF1 is reachable: {len(meetings)} finished race weekends since {since}")
+    return len(meetings)
+
+
 def slug(text: str) -> str:
     return re.sub(r"[^a-z0-9]+", "_", text.lower()).strip("_")
 
 
 def write_json(path: UPath, data: list | dict) -> None:
+    """Write to a temporary file first, so an interrupted run never leaves a truncated file behind."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(data), encoding="utf-8")
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(json.dumps(data), encoding="utf-8")
+    tmp.replace(path)
 
 
 def fetch_to_file(
@@ -107,7 +124,7 @@ def fetch_to_file(
         return rows
     start = time.monotonic()
     data = client.get(endpoint, params)
-    if not data:
+    if not data and endpoint not in MAY_BE_EMPTY:
         raise ValueError(f"{endpoint}: no data for {params}")
     write_json(path, data)
     print(
@@ -147,6 +164,9 @@ def fetch_session(
     if (session_dir / "_SUCCESS").exists() and not force:
         print("skip  session (complete)")
         return True
+    # A forced re-fetch removes the marker first: if it fails partway, the session must
+    # not look complete with a mix of old and new files.
+    (session_dir / "_SUCCESS").unlink(missing_ok=True)
 
     counts: dict[str, int] = {}
     failed = False
@@ -243,7 +263,9 @@ def run(
 
     meetings = find_meetings(client, since)
     if not meetings:
-        sys.exit(f"No meetings found since {since}")
+        # Normal in weeks without a race: nothing to do is not a failure.
+        print(f"No finished race weekend since {since}, nothing to fetch")
+        return 0
 
     results = []
     for meeting in meetings:

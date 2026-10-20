@@ -1,0 +1,38 @@
+# Kestra server configuration, mounted into the kestra container (see docker-compose.yml).
+# No secrets in here: Kestra fills in ${...} from the container's environment, which
+# docker-compose.yml sets from .env.
+# Sync flows from orchestration/flows (mounted to /flows): created on start-up and
+# updated whenever a file changes, so nothing has to be created or imported in the UI.
+micronaut:
+  io:
+    watch:
+      enabled: true
+      paths:
+        - /flows
+datasources:
+  postgres:
+    url: jdbc:postgresql://kestra-postgres:5432/kestra
+    driverClassName: org.postgresql.Driver
+    username: kestra
+    password: "${KESTRA_DB_PASSWORD}"
+kestra:
+  server:
+    basicAuth:
+      username: "${KESTRA_LOGIN_USER}"
+      password: "${KESTRA_LOGIN_PASSWORD}"
+  tutorialFlows:
+    enabled: false
+  repository:
+    type: postgres
+  queue:
+    type: postgres
+  storage:
+    type: local
+    local:
+      basePath: /app/storage
+  plugins:
+    configurations:
+      # Allows the flow to mount the raw-data volume into the task container.
+      - type: io.kestra.plugin.scripts.runner.docker.Docker
+        values:
+          volume-enabled: true
