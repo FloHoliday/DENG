@@ -71,11 +71,13 @@ value` names the line in `.env` to fix.
 
 ```sh
 docker compose build code
+docker volume create deng_raw_data
 docker compose up -d --wait
 ```
 
 The first command builds `deng-f1-code:local`, the image that contains the pipeline
-scripts (Kestra starts every task from it). The second starts PostgreSQL, pgAdmin,
+scripts (Kestra starts every task from it). The second creates the volume for the
+downloaded raw JSON (safe to repeat: an existing volume is kept as it is). The third starts PostgreSQL, pgAdmin,
 Kestra and Kestra's own database; Kestra loads the flow from `orchestration/flows/` by
 itself. It takes 1-2 minutes.
 
@@ -118,7 +120,8 @@ race weekend of the past week, as long as Docker is running.
 ```sh
 docker compose stop        # stop everything, keep all data
 docker compose up -d --wait  # start again
-docker compose down -v     # delete everything: database AND downloaded files (2.5 h to re-fetch)
+docker compose down -v     # delete the database, the downloaded files stay
+docker volume rm deng_raw_data  # also delete the downloaded files (2.5 h to re-fetch)
 ```
 
 ---

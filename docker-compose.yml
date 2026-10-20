@@ -78,9 +78,6 @@ services:
       - ./orchestration/application.yaml:/etc/kestra/application.yaml:ro
       # Kestra watches this folder and syncs every flow file into its database.
       - ./orchestration/flows:/flows:ro
-      # Not used by Kestra itself: mounting it makes `docker compose up` create the
-      # volume, which the task containers then mount by name.
-      - raw_data:/raw_data:ro
     environment:
       # Secrets for application.yaml: Kestra fills in its ${...} from these.
       KESTRA_DB_PASSWORD: ${KESTRA_DB_PASSWORD:?Set KESTRA_DB_PASSWORD in .env}
@@ -103,8 +100,10 @@ services:
 volumes:
   # Raw JSON files (data/raw). A named volume, not a host folder: Kestra's task containers
   # mount it by this fixed name, which works the same on macOS, Linux and Windows.
+  # Created once by hand (`docker volume create deng_raw_data`), so `down -v` keeps it.
   raw_data:
     name: deng_raw_data
+    external: true
   postgres_data:
   pgadmin_data:
   kestra_postgres_data:
