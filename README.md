@@ -394,6 +394,7 @@ gives the same result and a changed definition is picked up automatically.
 - `is_clean_lap`: not lap 1, no pit in/out lap, no Safety Car/VSC/red flag, no rain, and
   faster than 107 % of the driver's median green lap. Only these laps show real tyre
   pace; the others are dominated by the start, pit lane, neutralisation or traffic.
+  The 107 % threshold is borrowed from F1's [107% rule](https://en.wikipedia.org/wiki/107%25_rule).
 - Fuel correction: `lap_duration - 0.03 s/kg * 100 kg * (total_laps - lap_number) / total_laps`,
   i.e. 0.03 s per kg of remaining fuel, 100 kg at the start, the same amount burned every
   lap. A car gets faster as fuel burns off, which would hide tyre degradation. Sources:
