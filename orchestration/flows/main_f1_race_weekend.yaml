@@ -56,11 +56,17 @@ tasks:
       maxAttempts: 5
     commands:
       - cd /app
-      - python scripts/check_source.py --date {{ render(vars.day) }}
+      - python scripts/check_source.py
+
+  - id: find_race
+    type: io.kestra.plugin.scripts.shell.Commands
+    commands:
+      - cd /app
+      - python scripts/find_race.py --date {{ render(vars.day) }}
 
   - id: if_race
     type: io.kestra.plugin.core.flow.If
-    condition: "{{ outputs.check_source.vars.meeting_key is defined }}"
+    condition: "{{ outputs.find_race.vars.meeting_key is defined }}"
     then:
       - id: fetch
         type: io.kestra.plugin.scripts.shell.Commands
@@ -73,7 +79,7 @@ tasks:
           - cd /app
           - >-
             python scripts/fetch.py
-            --meeting-key {{ outputs.check_source.vars.meeting_key }}
+            --meeting-key {{ outputs.find_race.vars.meeting_key }}
 
       - id: load
         type: io.kestra.plugin.scripts.shell.Commands

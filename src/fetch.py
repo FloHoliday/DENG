@@ -82,8 +82,9 @@ class OpenF1Client:
         return resp.json()
 
 
-def find_race(client: OpenF1Client, day: date) -> dict | None:
+def find_race(day: date) -> dict | None:
     """The Race session that started in the 7 days before `day`, if any."""
+    client = OpenF1Client()
     races = client.get(
         "sessions",
         {
@@ -95,20 +96,26 @@ def find_race(client: OpenF1Client, day: date) -> dict | None:
     )
     if len(races) > 1:
         sys.exit(f"Expected at most one race in the week before {day}, got {races}")
-    return races[0] if races else None
-
-
-def check_source(day: date) -> int | None:
-    """Check that OpenF1 answers (no live-session lock); return the meeting_key of the race to fetch."""
-    race = find_race(OpenF1Client(), day)
-    if race is None:
-        print(f"OpenF1 is reachable: no race in the week before {day}")
+    if not races:
+        print(f"No race in the week before {day}")
         return None
+    race = races[0]
     print(
-        f"OpenF1 is reachable: race on {race['date_start'][:10]} in {race['location']} "
+        f"Race on {race['date_start'][:10]} in {race['location']} "
         f"(meeting_key={race['meeting_key']})"
     )
-    return race["meeting_key"]
+    return race
+
+
+def check_source() -> None:
+    """Fail if OpenF1 is unreachable or locked by a live session"""
+    resp = httpx.get(
+        f"{BASE_URL}/sessions", params={"session_key": "latest"}, timeout=30
+    )
+    if resp.status_code == 401:
+        sys.exit(f"OpenF1 access denied: {resp.json().get('detail', resp.text)}")
+    resp.raise_for_status()
+    print("OpenF1 is reachable")
 
 
 def slug(text: str) -> str:
@@ -123,9 +130,7 @@ def write_json(path: UPath, data: list | dict) -> None:
     tmp.replace(path)
 
 
-def fetch_to_file(
-    client: OpenF1Client, path: UPath, endpoint: str, **params
-) -> int:
+def fetch_to_file(client: OpenF1Client, path: UPath, endpoint: str, **params) -> int:
     """Fetch one endpoint into `path` and return its row count."""
     if path.exists():
         rows = len(json.loads(path.read_text(encoding="utf-8")))

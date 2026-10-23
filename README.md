@@ -99,10 +99,10 @@ itself. It takes 1-2 minutes.
    progress. `fetch` is the long one: it prints one line per downloaded file.
 
 **Expected:** after about 2.5 hours every execution is **SUCCESS**. Race weeks run all
-five tasks; weeks without a race stop green after `check_source`:
+six tasks; weeks without a race stop green after `find_race`:
 
 ```text
-check_source → fetch → load → transform → validate
+check_source → find_race → fetch → load → transform → validate
 ```
 
 > **In a hurry?** Click **Execute** instead and leave `date` empty (or set it to the Monday
@@ -131,7 +131,7 @@ docker volume rm deng_raw_data  # also delete the downloaded files (2.5 h to re-
 
 ### 2.1 Kestra
 
-The execution of `f1_race_weekend` is **SUCCESS** and all five tasks are green. The
+The execution of `f1_race_weekend` is **SUCCESS** and all six tasks are green. The
 `validate` task's log ends with `13 of 13 checks passed`.
 
 ### 2.2 Run the checks yourself
@@ -298,18 +298,21 @@ stint, stop or race) also serve a possible ML use case.
 
 ## 6. Pipeline steps
 
-One flow, five tasks. Each task runs one script from [`scripts/`](scripts) in its own
+One flow, six tasks. Each task runs one script from [`scripts/`](scripts) in its own
 container from the project image; the logic lives in [`src/`](src).
 
 | # | Task | Script | What it does | Fails when | Retry |
 |---|---|---|---|---|---|
-| 1 | `check_source` | `check_source.py [--date DATE]` | Asks OpenF1 for the finished Race in the 7 days before `DATE` and outputs its `meeting_key` to Kestra | API down or locked by a live session | yes |
-| 2 | `fetch` | `fetch.py --meeting-key KEY` | Downloads every endpoint of that weekend's Race into `data/raw/<year>/<meeting>/<session>/` (in the Docker volume `deng_raw_data`), unchanged JSON | any session incomplete | yes |
-| 3 | `load` | `load.py` | Loads every complete session into typed tables in schema `raw` | wrong type, unknown field, row-count mismatch | no |
-| 4 | `transform` | `transform.py [--full-refresh]` | Rebuilds the `staging`, `core` and `marts` models from [`sql/transform/`](sql/transform) | SQL error, duplicate key on a model's grain | no |
-| 5 | `validate` | `validate.py` | Runs the checks in [`sql/verify.sql`](sql/verify.sql) plus raw-files-vs-database | any check fails | no |
+| 1 | `check_source` | `check_source.py` | Sends one tiny request to check that OpenF1 answers | API down or locked by a live session | yes |
+| 2 | `find_race` | `find_race.py [--date DATE]` | Asks OpenF1 for the finished Race in the 7 days before `DATE` and outputs its `meeting_key` to Kestra | more than one race found | no |
+| 3 | `fetch` | `fetch.py --meeting-key KEY` | Downloads every endpoint of that weekend's Race into `data/raw/<year>/<meeting>/<session>/` (in the Docker volume `deng_raw_data`), unchanged JSON | any session incomplete | yes |
+| 4 | `load` | `load.py` | Loads every complete session into typed tables in schema `raw` | wrong type, unknown field, row-count mismatch | no |
+| 5 | `transform` | `transform.py [--full-refresh]` | Rebuilds the `staging`, `core` and `marts` models from [`sql/transform/`](sql/transform) | SQL error, duplicate key on a model's grain | no |
+| 6 | `validate` | `validate.py` | Runs the checks in [`sql/verify.sql`](sql/verify.sql) plus raw-files-vs-database | any check fails | no |
 
-Only the two network tasks retry (exponential, 5 min → 1 h, 4 attempts). The other three
+Only `check_source` (exponential, 15 min → 1 h, 5 attempts) and `fetch` (5 min → 1 h,
+4 attempts) are retried by Kestra. `find_race` runs right after a successful
+`check_source`, so it only retries its HTTP request (`tenacity`). The other three
 fail for permanent reasons (bad data, bad SQL), where a retry would only repeat the
 failure.
 
@@ -324,7 +327,7 @@ is loaded. A rerun skips everything that is already complete.
   all its endpoints were downloaded. Files are written to a temporary name first and then
   renamed, so an interruption never leaves a half-written file.
 - An empty response where data is expected counts as a failure (no `_SUCCESS`).
-- A week without a race is not an error: `check_source` outputs `meeting_key: null`
+- A week without a race is not an error: `find_race` outputs `meeting_key: null`
   and the execution ends successfully without running the later steps.
 
 ### 6.2 Load (storage)
@@ -349,7 +352,8 @@ previous version of every model.
 Every task can also be run by hand (handy for development):
 
 ```sh
-docker compose run --rm code scripts/check_source.py --date 2026-10-13  # prints the meeting_key
+docker compose run --rm code scripts/check_source.py
+docker compose run --rm code scripts/find_race.py --date 2026-10-13  # prints the meeting_key
 docker compose run --rm code scripts/fetch.py --meeting-key <meeting_key>
 docker compose run --rm code scripts/load.py
 docker compose run --rm code scripts/transform.py
@@ -473,12 +477,13 @@ flowchart LR
 
     subgraph kestra["Kestra: weekly schedule, retries, restart, backfill, 1 run at a time"]
         direction LR
-        check["1 check_source<br/>API reachable?<br/>race last week?"]
-        fetch["2 fetch<br/>Python, rate-limited<br/>_SUCCESS per session"]
-        load["3 load<br/>replace per session<br/>in 1 transaction"]
-        transform["4 transform<br/>SQL: staging → core → marts"]
-        validate["5 validate<br/>sql/verify.sql"]
-        check --> fetch --> load --> transform --> validate
+        check["1 check_source<br/>API reachable?"]
+        find["2 find_race<br/>race last week?"]
+        fetch["3 fetch<br/>Python, rate-limited<br/>_SUCCESS per session"]
+        load["4 load<br/>replace per session<br/>in 1 transaction"]
+        transform["5 transform<br/>SQL: staging → core → marts"]
+        validate["6 validate<br/>sql/verify.sql"]
+        check --> find --> fetch --> load --> transform --> validate
     end
 
     raw[("data/raw<br/>immutable JSON files<br/>volume deng_raw_data")]
@@ -491,6 +496,7 @@ flowchart LR
     user["Strategist<br/>pgAdmin / SQL"]
 
     source --> check
+    source --> find
     source --> fetch
     fetch --> raw --> load --> rawdb
     transform -.-> staging & core & marts
