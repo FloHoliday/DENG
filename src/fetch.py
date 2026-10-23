@@ -1,10 +1,10 @@
-"""Fetch step: fetch the raw OpenF1 data of all race weekends since a date and save it unchanged as JSON."""
+"""Fetch step: fetch the raw OpenF1 data of one race weekend and save it unchanged as JSON."""
 
 import json
 import re
 import sys
 import time
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 
 import httpx
 from pyrate_limiter import Duration, Limiter, Rate
@@ -82,24 +82,33 @@ class OpenF1Client:
         return resp.json()
 
 
-def find_meetings(client: OpenF1Client, since: date) -> list[dict]:
-    """Non-cancelled meetings starting on or after `since`."""
-    today = datetime.now(UTC).date()
-    return client.get(
-        "meetings",
-        {"date_start>": str(since), "date_end<": str(today), "is_cancelled": False},
+def find_race(client: OpenF1Client, day: date) -> dict | None:
+    """The Race session that started in the 7 days before `day`, if any."""
+    races = client.get(
+        "sessions",
+        {
+            "session_name": "Race",
+            "date_start>": str(day - timedelta(days=7)),
+            "date_start<": str(day - timedelta(days=1)),
+            "is_cancelled": False,
+        },
     )
+    if len(races) > 1:
+        sys.exit(f"Expected at most one race in the week before {day}, got {races}")
+    return races[0] if races else None
 
 
-def check_source(since: date) -> int:
-    """Check that OpenF1 answers (no live-session lock) and list the race weekends to fetch."""
-    meetings = find_meetings(OpenF1Client(), since)
-    for meeting in meetings:
-        print(
-            f"{meeting['date_start'][:10]}  {meeting['meeting_name']} (meeting_key={meeting['meeting_key']})"
-        )
-    print(f"OpenF1 is reachable: {len(meetings)} finished race weekends since {since}")
-    return len(meetings)
+def check_source(day: date) -> int | None:
+    """Check that OpenF1 answers (no live-session lock); return the meeting_key of the race to fetch."""
+    race = find_race(OpenF1Client(), day)
+    if race is None:
+        print(f"OpenF1 is reachable: no race in the week before {day}")
+        return None
+    print(
+        f"OpenF1 is reachable: race on {race['date_start'][:10]} in {race['location']} "
+        f"(meeting_key={race['meeting_key']})"
+    )
+    return race["meeting_key"]
 
 
 def slug(text: str) -> str:
@@ -254,23 +263,17 @@ def fetch_meeting(
 
 
 def run(
-    since: date,
+    meeting_key: int,
     raw_dir: UPath,
     force: bool = False,
 ) -> int:
-    """Fetch all race weekends since `since` into `raw_dir`; returns the number of failed sessions."""
+    """Fetch one race weekend into `raw_dir`; returns the number of failed sessions."""
     client = OpenF1Client()
 
-    meetings = find_meetings(client, since)
+    meetings = client.get("meetings", {"meeting_key": meeting_key})
     if not meetings:
-        # Normal in weeks without a race: nothing to do is not a failure.
-        print(f"No finished race weekend since {since}, nothing to fetch")
-        return 0
+        sys.exit(f"No meeting with meeting_key={meeting_key}")
 
-    results = []
-    for meeting in meetings:
-        results += fetch_meeting(client, meeting, raw_dir, force)
-    print(
-        f"Fetched {results.count(True)} of {len(results)} sessions from {len(meetings)} meetings into {raw_dir}"
-    )
+    results = fetch_meeting(client, meetings[0], raw_dir, force)
+    print(f"Fetched {results.count(True)} of {len(results)} sessions into {raw_dir}")
     return results.count(False)
