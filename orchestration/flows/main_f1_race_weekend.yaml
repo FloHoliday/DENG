@@ -85,7 +85,9 @@ tasks:
         type: io.kestra.plugin.scripts.shell.Commands
         commands:
           - cd /app
-          - python scripts/load.py
+          - >-
+            python scripts/load.py
+            --meeting-key {{ outputs.find_race.vars.meeting_key }}
 
       - id: transform
         type: io.kestra.plugin.scripts.shell.Commands
@@ -97,4 +99,6 @@ tasks:
         type: io.kestra.plugin.scripts.shell.Commands
         commands:
           - cd /app
-          - python scripts/validate.py
+          - >-
+            python scripts/validate.py
+            --meeting-key {{ outputs.find_race.vars.meeting_key }}

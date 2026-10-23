@@ -132,7 +132,8 @@ docker volume rm deng_raw_data  # also delete the downloaded files (2.5 h to re-
 ### 2.1 Kestra
 
 The execution of `f1_race_weekend` is **SUCCESS** and all six tasks are green. The
-`validate` task's log ends with `13 of 13 checks passed`.
+`validate` task's log ends with `14 of 14 checks passed` (the 13 checks below, plus
+`the race of meeting <meeting_key> is loaded`).
 
 ### 2.2 Run the checks yourself
 
@@ -340,6 +341,9 @@ is loaded. A rerun skips everything that is already complete.
   its earlier rows stay.
 - **Incremental:** `raw.loaded_sessions` records which `_SUCCESS` marker each session
   was loaded from; only new or re-fetched sessions are loaded.
+- **Scoped:** Kestra passes the `meeting_key` to `load` and `validate`, so they only look
+  at that meeting's folder. Without `--meeting-key` they scan all of `data/raw`, e.g. to
+  catch up on a session that failed to load earlier.
 
 ### 6.3 Transform and validate
 
@@ -355,9 +359,9 @@ Every task can also be run by hand (handy for development):
 docker compose run --rm code scripts/check_source.py
 docker compose run --rm code scripts/find_race.py --date 2026-10-13  # prints the meeting_key
 docker compose run --rm code scripts/fetch.py --meeting-key <meeting_key>
-docker compose run --rm code scripts/load.py
+docker compose run --rm code scripts/load.py --meeting-key <meeting_key>  # omit: all of data/raw
 docker compose run --rm code scripts/transform.py
-docker compose run --rm code scripts/validate.py
+docker compose run --rm code scripts/validate.py --meeting-key <meeting_key>  # omit: all of data/raw
 ```
 
 After changing Python code or SQL files, rebuild the image (`docker compose build code`)

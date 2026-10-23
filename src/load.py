@@ -37,6 +37,12 @@ def read_json(path: UPath):
     return json.loads(path.read_text(encoding="utf-8"))
 
 
+def success_markers(raw_dir: UPath, meeting_key: int | None = None) -> list[UPath]:
+    """The _SUCCESS markers of one meeting (raw/<year>/<meeting_key>_<location>/), or of all."""
+    pattern = f"*/{meeting_key}_*/*/_SUCCESS" if meeting_key else "**/_SUCCESS"
+    return sorted(raw_dir.glob(pattern))
+
+
 def table_files(session_dir: UPath, table: str) -> list[UPath]:
     if table == "car_data":
         return sorted(session_dir.glob("car_data/*.json"))
@@ -117,9 +123,10 @@ def load_session(session_dir: UPath, engine) -> int:
     return loaded
 
 
-def run(raw_dir: UPath) -> int:
+def run(raw_dir: UPath, meeting_key: int | None = None) -> int:
     """Load every session whose _SUCCESS marker is newer than its last load; returns the number failed.
 
+    Only the sessions of `meeting_key` are considered, or all of `raw_dir` if it is None.
     A failed session is rolled back and reported; the sessions after it are still loaded.
     """
     engine = create_engine_from_env()
@@ -134,7 +141,7 @@ def run(raw_dir: UPath) -> int:
 
         count = 0
         failed = 0
-        for marker in sorted(raw_dir.glob("**/_SUCCESS")):
+        for marker in success_markers(raw_dir, meeting_key):
             session_dir = marker.parent
             session_key = int(session_dir.name.split("_")[0])
             completed_at = datetime.fromisoformat(read_json(marker)["completed_at"])
