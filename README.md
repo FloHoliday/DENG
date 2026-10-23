@@ -304,7 +304,7 @@ container from the project image; the logic lives in [`src/`](src).
 | # | Task | Script | What it does | Fails when | Retry |
 |---|---|---|---|---|---|
 | 1 | `check_source` | `check_source.py [--date DATE]` | Asks OpenF1 for the finished Race in the 7 days before `DATE` and outputs its `meeting_key` to Kestra | API down or locked by a live session | yes |
-| 2 | `fetch` | `fetch.py --meeting-key KEY [--force]` | Downloads every endpoint of that weekend's Race into `data/raw/<year>/<meeting>/<session>/` (in the Docker volume `deng_raw_data`), unchanged JSON | any session incomplete | yes |
+| 2 | `fetch` | `fetch.py --meeting-key KEY` | Downloads every endpoint of that weekend's Race into `data/raw/<year>/<meeting>/<session>/` (in the Docker volume `deng_raw_data`), unchanged JSON | any session incomplete | yes |
 | 3 | `load` | `load.py` | Loads every complete session into typed tables in schema `raw` | wrong type, unknown field, row-count mismatch | no |
 | 4 | `transform` | `transform.py [--full-refresh]` | Rebuilds the `staging`, `core` and `marts` models from [`sql/transform/`](sql/transform) | SQL error, duplicate key on a model's grain | no |
 | 5 | `validate` | `validate.py` | Runs the checks in [`sql/verify.sql`](sql/verify.sql) plus raw-files-vs-database | any check fails | no |
@@ -452,7 +452,6 @@ so every way of running the flow again is safe:
 | A task failed | open the execution → **Restart** (continues at the failed task) | finished sessions are skipped, each session is replaced in one transaction |
 | Missed Mondays (Docker was off) | **Triggers** tab → `monday_after_race_weekend` → **Backfill executions** with a date range | each backfill run uses its own scheduled date, not today |
 | Full history or a specific period | **Backfill executions** from e.g. `2023-01-01`; one race: **Execute** with `date` = the Monday after it | one race per execution, already loaded races are skipped |
-| Re-download a race (suspected bad data) | **Execute** with `force` = on | new `_SUCCESS` marker → the session is reloaded |
 | Two runs at once | they queue (`concurrency: limit 1`) | they never write the same files or rows at the same time |
 
 Kestra watches `orchestration/flows/` (mounted to `/flows`, see

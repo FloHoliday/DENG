@@ -12,10 +12,6 @@ inputs:
     type: DATE
     defaults: "{{ now() | date('yyyy-MM-dd') }}"
     description: Manual runs only. Ingest the race of the 7 days before this date.
-  - id: force
-    type: BOOL
-    defaults: false
-    description: Re-fetch files that already exist.
 
 variables:
   day: >-
@@ -78,7 +74,6 @@ tasks:
           - >-
             python scripts/fetch.py
             --meeting-key {{ outputs.check_source.vars.meeting_key }}
-            {{ inputs.force ? '--force' : '' }}
 
       - id: load
         type: io.kestra.plugin.scripts.shell.Commands

@@ -24,12 +24,9 @@ if __name__ == "__main__":
         default=UPath("data/raw"),
         help="local path or gs://bucket/path, default: data/raw",
     )
-    parser.add_argument(
-        "-f", "--force", action="store_true", help="re-fetch existing files"
-    )
     args = parser.parse_args()
 
-    failed = fetch.run(args.meeting_key, args.raw_dir, force=args.force)
+    failed = fetch.run(args.meeting_key, args.raw_dir)
     # Fail fast: nothing is loaded until every session is complete; a re-run resumes.
     if failed:
         sys.exit(f"{failed} sessions failed, re-run to resume")

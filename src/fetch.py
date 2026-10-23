@@ -124,10 +124,10 @@ def write_json(path: UPath, data: list | dict) -> None:
 
 
 def fetch_to_file(
-    client: OpenF1Client, path: UPath, force: bool, endpoint: str, **params
+    client: OpenF1Client, path: UPath, endpoint: str, **params
 ) -> int:
     """Fetch one endpoint into `path` and return its row count."""
-    if path.exists() and not force:
+    if path.exists():
         rows = len(json.loads(path.read_text(encoding="utf-8")))
         print(f"skip  {path.name:<40} {rows:6d} rows (exists)")
         return rows
@@ -143,7 +143,7 @@ def fetch_to_file(
 
 
 def fetch_car_data(
-    client: OpenF1Client, session_dir: UPath, session_key: int, force: bool
+    client: OpenF1Client, session_dir: UPath, session_key: int
 ) -> dict[str, int]:
     drivers = json.loads((session_dir / "drivers.json").read_text(encoding="utf-8"))
     counts = {}
@@ -152,7 +152,6 @@ def fetch_car_data(
         counts[name] = fetch_to_file(
             client,
             session_dir / f"{name}.json",
-            force,
             "car_data",
             session_key=session_key,
             driver_number=driver_number,
@@ -164,18 +163,14 @@ def fetch_session(
     client: OpenF1Client,
     session: dict,
     meeting_dir: UPath,
-    force: bool,
 ) -> bool:
     session_key = session["session_key"]
     session_dir = meeting_dir / f"{session_key}_{slug(session['session_name'])}"
     print(f"== {session['session_name']} (session_key={session_key}) -> {session_dir}")
     # Keep the marker unchanged so the store step doesn't reload the session.
-    if (session_dir / "_SUCCESS").exists() and not force:
+    if (session_dir / "_SUCCESS").exists():
         print("skip  session (complete)")
         return True
-    # A forced re-fetch removes the marker first: if it fails partway, the session must
-    # not look complete with a mix of old and new files.
-    (session_dir / "_SUCCESS").unlink(missing_ok=True)
 
     counts: dict[str, int] = {}
     failed = False
@@ -184,7 +179,6 @@ def fetch_session(
             counts[endpoint] = fetch_to_file(
                 client,
                 session_dir / f"{endpoint}.json",
-                force,
                 endpoint,
                 session_key=session_key,
             )
@@ -204,7 +198,6 @@ def fetch_session(
             counts["starting_grid"] = fetch_to_file(
                 client,
                 session_dir / "starting_grid.json",
-                force,
                 "starting_grid",
                 session_key=grid_sessions[0]["session_key"],
             )
@@ -214,7 +207,7 @@ def fetch_session(
 
     if "drivers" in counts:
         try:
-            counts |= fetch_car_data(client, session_dir, session_key, force)
+            counts |= fetch_car_data(client, session_dir, session_key)
         except FETCH_ERRORS as exc:
             print(f"FAILED car_data: {exc}", file=sys.stderr)
             failed = True
@@ -236,7 +229,6 @@ def fetch_meeting(
     client: OpenF1Client,
     meeting: dict,
     raw_dir: UPath,
-    force: bool,
 ) -> list[bool]:
     """Fetch the meeting metadata and the `selected` sessions; one result per session."""
     try:
@@ -259,14 +251,10 @@ def fetch_meeting(
     write_json(meeting_dir / "meeting.json", meeting)
     write_json(meeting_dir / "sessions.json", sessions)
 
-    return [fetch_session(client, s, meeting_dir, force) for s in sessions]
+    return [fetch_session(client, s, meeting_dir) for s in sessions]
 
 
-def run(
-    meeting_key: int,
-    raw_dir: UPath,
-    force: bool = False,
-) -> int:
+def run(meeting_key: int, raw_dir: UPath) -> int:
     """Fetch one race weekend into `raw_dir`; returns the number of failed sessions."""
     client = OpenF1Client()
 
@@ -274,6 +262,6 @@ def run(
     if not meetings:
         sys.exit(f"No meeting with meeting_key={meeting_key}")
 
-    results = fetch_meeting(client, meetings[0], raw_dir, force)
+    results = fetch_meeting(client, meetings[0], raw_dir)
     print(f"Fetched {results.count(True)} of {len(results)} sessions into {raw_dir}")
     return results.count(False)
