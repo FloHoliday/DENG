@@ -10,14 +10,14 @@ description: |
 inputs:
   - id: date
     type: DATE
-    defaults: "{{ now() | date('yyyy-MM-dd') }}"
-    description: Manual runs only. Ingest the race of the 7 days before this date.
+    required: false
+    description: Manual runs only. Ingest the race of the 7 days before this date (empty = today).
 
 variables:
   day: >-
     {{ trigger.date is defined
        ? (trigger.date | date('yyyy-MM-dd'))
-       : inputs.date }}
+       : inputs.date ?? (now(timeZone="Europe/Zurich") | date('yyyy-MM-dd')) }}
 
 concurrency:
   limit: 1
