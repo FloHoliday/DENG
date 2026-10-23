@@ -92,23 +92,24 @@ itself. It takes 1-2 minutes.
 1. Open **http://localhost:8080** and log in with `KESTRA_USER` / `KESTRA_PASSWORD` from
    your `.env` (default: `student@example.com` / `Change-me-Kestra1`).
 2. Left menu **Flows** → click **`f1_race_weekend`** (namespace `deng.f1`).
-3. Click **Execute** (top right). Keep the defaults (`since` = `2023-01-01`, `force` = off)
-   and click **Execute** again.
-4. Open the **Gantt** tab to see the five tasks and the **Logs** tab to follow progress.
-   `fetch` is the long one: it prints one line per downloaded file.
+3. Open the **Triggers** tab → `monday_after_race_weekend` → **Backfill executions**.
+   Set the start to `2023-01-01`, leave the end at now, and confirm. Kestra creates one
+   execution per Monday; each loads the race of the week before it (if any), one at a time.
+4. Open an execution's **Gantt** tab to see the tasks and the **Logs** tab to follow
+   progress. `fetch` is the long one: it prints one line per downloaded file.
 
-**Expected:** after about 2.5 hours all five tasks are green and the execution state is
-**SUCCESS**:
+**Expected:** after about 2.5 hours every execution is **SUCCESS**. Race weeks run all
+six tasks; weeks without a race stop green after `find_race`:
 
 ```text
-check_source → fetch → load → transform → validate
+check_source → find_race → fetch → load → transform → validate
 ```
 
-> **In a hurry?** Execute with `since` = `2026-10-01` instead. That loads only the last
-> two race weekends (about 5 minutes), enough to check that everything works. You can run
-> the full history later; already downloaded races are skipped.
+> **In a hurry?** Click **Execute** instead and leave `date` empty (or set it to the Monday
+> after a race). That loads one race weekend (about 3 minutes), enough to check that
+> everything works. You can backfill the full history later; downloaded races are skipped.
 
-**If the first run is interrupted** (laptop asleep, Docker restarted, Wi-Fi gone): start
+**If a run is interrupted** (laptop asleep, Docker restarted, Wi-Fi gone): start
 Docker again, run `docker compose up -d --wait`, open the failed execution in Kestra and
 click **Restart**, or just execute the flow again. Nothing is downloaded or loaded twice.
 
@@ -130,8 +131,9 @@ docker volume rm deng_raw_data  # also delete the downloaded files (2.5 h to re-
 
 ### 2.1 Kestra
 
-The execution of `f1_race_weekend` is **SUCCESS** and all five tasks are green. The
-`validate` task's log ends with `13 of 13 checks passed`.
+The execution of `f1_race_weekend` is **SUCCESS** and all six tasks are green. The
+`validate` task's log ends with `14 of 14 checks passed` (the 13 checks below, plus
+`the race of meeting <meeting_key> is loaded`).
 
 ### 2.2 Run the checks yourself
 
@@ -297,18 +299,21 @@ stint, stop or race) also serve a possible ML use case.
 
 ## 6. Pipeline steps
 
-One flow, five tasks. Each task runs one script from [`scripts/`](scripts) in its own
+One flow, six tasks. Each task runs one script from [`scripts/`](scripts) in its own
 container from the project image; the logic lives in [`src/`](src).
 
 | # | Task | Script | What it does | Fails when | Retry |
 |---|---|---|---|---|---|
-| 1 | `check_source` | `check_source.py --since DATE` | Asks OpenF1 for finished race weekends since `DATE` and lists them | API down or locked by a live session | yes |
-| 2 | `fetch` | `fetch.py --since DATE [--force]` | Downloads every endpoint of each Race into `data/raw/<year>/<meeting>/<session>/` (in the Docker volume `deng_raw_data`), unchanged JSON | any session incomplete | yes |
-| 3 | `load` | `load.py` | Loads every complete session into typed tables in schema `raw` | wrong type, unknown field, row-count mismatch | no |
-| 4 | `transform` | `transform.py [--full-refresh]` | Rebuilds the `staging`, `core` and `marts` models from [`sql/transform/`](sql/transform) | SQL error, duplicate key on a model's grain | no |
-| 5 | `validate` | `validate.py` | Runs the checks in [`sql/verify.sql`](sql/verify.sql) plus raw-files-vs-database | any check fails | no |
+| 1 | `check_source` | `check_source.py` | Sends one tiny request to check that OpenF1 answers | API down or locked by a live session | yes |
+| 2 | `find_race` | `find_race.py [--date DATE]` | Asks OpenF1 for the finished Race in the 7 days before `DATE` and outputs its `meeting_key` to Kestra | more than one race found | no |
+| 3 | `fetch` | `fetch.py --meeting-key KEY` | Downloads every endpoint of that weekend's Race into `data/raw/<year>/<meeting>/<session>/` (in the Docker volume `deng_raw_data`), unchanged JSON | any session incomplete | yes |
+| 4 | `load` | `load.py` | Loads every complete session into typed tables in schema `raw` | wrong type, unknown field, row-count mismatch | no |
+| 5 | `transform` | `transform.py [--full-refresh]` | Rebuilds the `staging`, `core` and `marts` models from [`sql/transform/`](sql/transform) | SQL error, duplicate key on a model's grain | no |
+| 6 | `validate` | `validate.py` | Runs the checks in [`sql/verify.sql`](sql/verify.sql) plus raw-files-vs-database | any check fails | no |
 
-Only the two network tasks retry (exponential, 5 min → 1 h, 4 attempts). The other three
+Only `check_source` (exponential, 15 min → 1 h, 5 attempts) and `fetch` (5 min → 1 h,
+4 attempts) are retried by Kestra. `find_race` runs right after a successful
+`check_source`, so it only retries its HTTP request (`tenacity`). The other three
 fail for permanent reasons (bad data, bad SQL), where a retry would only repeat the
 failure.
 
@@ -323,8 +328,8 @@ is loaded. A rerun skips everything that is already complete.
   all its endpoints were downloaded. Files are written to a temporary name first and then
   renamed, so an interruption never leaves a half-written file.
 - An empty response where data is expected counts as a failure (no `_SUCCESS`).
-- A week without a race is not an error: `check_source` and `fetch` report "0 race
-  weekends" and exit successfully; the later steps then have nothing new to do.
+- A week without a race is not an error: `find_race` outputs `meeting_key: null`
+  and the execution ends successfully without running the later steps.
 
 ### 6.2 Load (storage)
 
@@ -336,6 +341,9 @@ is loaded. A rerun skips everything that is already complete.
   its earlier rows stay.
 - **Incremental:** `raw.loaded_sessions` records which `_SUCCESS` marker each session
   was loaded from; only new or re-fetched sessions are loaded.
+- **Scoped:** Kestra passes the `meeting_key` to `load` and `validate`, so they only look
+  at that meeting's folder. Without `--meeting-key` they scan all of `data/raw`, e.g. to
+  catch up on a session that failed to load earlier.
 
 ### 6.3 Transform and validate
 
@@ -348,11 +356,12 @@ previous version of every model.
 Every task can also be run by hand (handy for development):
 
 ```sh
-docker compose run --rm code scripts/check_source.py --since 2026-10-01
-docker compose run --rm code scripts/fetch.py --since 2026-10-01
-docker compose run --rm code scripts/load.py
+docker compose run --rm code scripts/check_source.py
+docker compose run --rm code scripts/find_race.py --date 2026-10-13  # prints the meeting_key
+docker compose run --rm code scripts/fetch.py --meeting-key <meeting_key>
+docker compose run --rm code scripts/load.py --meeting-key <meeting_key>  # omit: all of data/raw
 docker compose run --rm code scripts/transform.py
-docker compose run --rm code scripts/validate.py
+docker compose run --rm code scripts/validate.py --meeting-key <meeting_key>  # omit: all of data/raw
 ```
 
 After changing Python code or SQL files, rebuild the image (`docker compose build code`)
@@ -447,11 +456,10 @@ so every way of running the flow again is safe:
 
 | Situation | What to do | Why it is safe |
 |---|---|---|
-| Weekly run | nothing: schedule `0 6 * * 1` (Monday 06:00, Europe/Zurich), looks back 8 days from the scheduled date | the weekend's race is finished, and no session is live on Monday morning |
+| Weekly run | nothing: schedule `0 6 * * 1` (Monday 06:00, Europe/Zurich), loads the race of the 7 days before the scheduled date | the weekend's race is finished, and no session is live on Monday morning |
 | A task failed | open the execution → **Restart** (continues at the failed task) | finished sessions are skipped, each session is replaced in one transaction |
 | Missed Mondays (Docker was off) | **Triggers** tab → `monday_after_race_weekend` → **Backfill executions** with a date range | each backfill run uses its own scheduled date, not today |
-| Full history or a specific period | **Execute** with `since` = e.g. `2023-01-01` | same flow, already loaded races are skipped |
-| Re-download a race (suspected bad data) | **Execute** with `force` = on | new `_SUCCESS` marker → the session is reloaded |
+| Full history or a specific period | **Backfill executions** from e.g. `2023-01-01`; one race: **Execute** with `date` = the Monday after it | one race per execution, already loaded races are skipped |
 | Two runs at once | they queue (`concurrency: limit 1`) | they never write the same files or rows at the same time |
 
 Kestra watches `orchestration/flows/` (mounted to `/flows`, see
@@ -473,12 +481,13 @@ flowchart LR
 
     subgraph kestra["Kestra: weekly schedule, retries, restart, backfill, 1 run at a time"]
         direction LR
-        check["1 check_source<br/>API reachable?<br/>new race weekends?"]
-        fetch["2 fetch<br/>Python, rate-limited<br/>_SUCCESS per session"]
-        load["3 load<br/>replace per session<br/>in 1 transaction"]
-        transform["4 transform<br/>SQL: staging → core → marts"]
-        validate["5 validate<br/>sql/verify.sql"]
-        check --> fetch --> load --> transform --> validate
+        check["1 check_source<br/>API reachable?"]
+        find["2 find_race<br/>race last week?"]
+        fetch["3 fetch<br/>Python, rate-limited<br/>_SUCCESS per session"]
+        load["4 load<br/>replace per session<br/>in 1 transaction"]
+        transform["5 transform<br/>SQL: staging → core → marts"]
+        validate["6 validate<br/>sql/verify.sql"]
+        check --> find --> fetch --> load --> transform --> validate
     end
 
     raw[("data/raw<br/>immutable JSON files<br/>volume deng_raw_data")]
@@ -491,6 +500,7 @@ flowchart LR
     user["Strategist<br/>pgAdmin / SQL"]
 
     source --> check
+    source --> find
     source --> fetch
     fetch --> raw --> load --> rawdb
     transform -.-> staging & core & marts

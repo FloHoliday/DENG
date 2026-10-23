@@ -13,12 +13,17 @@ import validate
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
+        "--meeting-key",
+        type=int,
+        help="also check that this meeting's race is loaded; compare only its sessions with data/raw",
+    )
+    parser.add_argument(
         "--raw-dir",
         type=UPath,
         default=UPath("data/raw"),
         help="local path or gs://bucket/path, default: data/raw",
     )
     args = parser.parse_args()
-    failed = validate.run(args.raw_dir)
+    failed = validate.run(args.raw_dir, args.meeting_key)
     if failed:
         sys.exit(f"{failed} checks failed")
