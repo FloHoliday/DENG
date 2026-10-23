@@ -7,12 +7,14 @@ from pathlib import Path
 from sqlalchemy import text
 from upath import UPath
 
-from load import create_engine_from_env
+from load import create_engine_from_env, success_markers
 
 VERIFY_SQL = Path(__file__).parents[1] / "sql/verify.sql"
 
 
-def unloaded_sessions(raw_dir: UPath, connection) -> list[str]:
+def unloaded_sessions(
+    raw_dir: UPath, connection, meeting_key: int | None = None
+) -> list[str]:
     """Session folders whose _SUCCESS marker is not the one recorded in loaded_sessions."""
     loaded = dict(
         connection.execute(
@@ -20,7 +22,7 @@ def unloaded_sessions(raw_dir: UPath, connection) -> list[str]:
         ).fetchall()
     )
     missing = []
-    for marker in sorted(raw_dir.glob("**/_SUCCESS")):
+    for marker in success_markers(raw_dir, meeting_key):
         session_key = int(marker.parent.name.split("_")[0])
         completed_at = json.loads(marker.read_text(encoding="utf-8"))["completed_at"]
         if loaded.get(session_key) != datetime.fromisoformat(completed_at):
@@ -28,12 +30,33 @@ def unloaded_sessions(raw_dir: UPath, connection) -> list[str]:
     return missing
 
 
-def run(raw_dir: UPath) -> int:
-    """Print PASS/FAIL per check; returns the number of failed checks."""
+def race_loaded(connection, meeting_key: int) -> bool:
+    """Whether the race session of the meeting is in loaded_sessions."""
+    return bool(
+        connection.scalar(
+            text("""
+                SELECT EXISTS (
+                    SELECT 1
+                    FROM raw.loaded_sessions AS ls
+                    JOIN raw.sessions AS s USING (session_key)
+                    WHERE s.meeting_key = :k AND s.session_name = 'Race'
+                )
+            """),
+            {"k": meeting_key},
+        )
+    )
+
+
+def run(raw_dir: UPath, meeting_key: int | None = None) -> int:
+    """Print PASS/FAIL per check; returns the number of failed checks.
+
+    With `meeting_key`, only that meeting's sessions are compared with data/raw, and its race
+    must be loaded (so a fetch that wrote nothing fails); the SQL checks always cover everything.
+    """
     engine = create_engine_from_env()
     try:
         with engine.connect() as connection:
-            missing = unloaded_sessions(raw_dir, connection)
+            missing = unloaded_sessions(raw_dir, connection, meeting_key)
             results = [
                 (
                     "every fetched session (_SUCCESS) is loaded",
@@ -41,6 +64,14 @@ def run(raw_dir: UPath) -> int:
                     ", ".join(missing[:5]),
                 )
             ]
+            if meeting_key:
+                results.append(
+                    (
+                        f"the race of meeting {meeting_key} is loaded",
+                        0 if race_loaded(connection, meeting_key) else 1,
+                        "no loaded Race session",
+                    )
+                )
             results += connection.execute(
                 text(VERIFY_SQL.read_text(encoding="utf-8"))
             ).fetchall()
