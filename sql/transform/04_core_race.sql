@@ -231,9 +231,10 @@ CREATE UNIQUE INDEX ON core.fct_position_swap (session_key, lap_number, gaining_
 -- Grain: (session_key, driver_number, lap_number) of the attacker's green-flag stop.
 -- Undercut attempt: A is directly behind B at the end of the lap before A's stop, and B
 -- stops 1 to 3 laps later. Success: A is ahead of B at the end of B's out-lap.
--- Both stops are real green-flag stops.
+-- Both stops are real green-flag stops. If B stops more than once in that window (e.g.
+-- PER at Suzuka 2023), only B's first stop counts.
 CREATE MATERIALIZED VIEW core.fct_undercut_attempt AS
-SELECT
+SELECT DISTINCT ON (a_stop.session_key, a_stop.driver_number, a_stop.lap_number)
     a_stop.session_key,
     a_stop.season,
     a_stop.circuit_short_name,
@@ -265,6 +266,7 @@ JOIN core.fct_lap_position AS b_after
     ON b_after.session_key = a_stop.session_key
    AND b_after.driver_number = b_stop.driver_number
    AND b_after.lap_number = b_stop.lap_number + 1
-WHERE a_stop.is_real_stop AND NOT a_stop.is_under_neutralisation;
+WHERE a_stop.is_real_stop AND NOT a_stop.is_under_neutralisation
+ORDER BY a_stop.session_key, a_stop.driver_number, a_stop.lap_number, b_stop.lap_number;
 
 CREATE UNIQUE INDEX ON core.fct_undercut_attempt (session_key, driver_number, lap_number);
