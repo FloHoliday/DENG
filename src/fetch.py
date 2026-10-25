@@ -1,10 +1,10 @@
-"""Fetch step: fetch the raw OpenF1 data of all race weekends since a date and save it unchanged as JSON."""
+"""Fetch step: fetch the raw OpenF1 data of one race weekend and save it unchanged as JSON."""
 
 import json
 import re
 import sys
 import time
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 
 import httpx
 from pyrate_limiter import Duration, Limiter, Rate
@@ -82,24 +82,40 @@ class OpenF1Client:
         return resp.json()
 
 
-def find_meetings(client: OpenF1Client, since: date) -> list[dict]:
-    """Non-cancelled meetings starting on or after `since`."""
-    today = datetime.now(UTC).date()
-    return client.get(
-        "meetings",
-        {"date_start>": str(since), "date_end<": str(today), "is_cancelled": False},
+def find_race(day: date) -> dict | None:
+    """The Race session that started in the 7 days before `day`, if any."""
+    client = OpenF1Client()
+    races = client.get(
+        "sessions",
+        {
+            "session_name": "Race",
+            "date_start>": str(day - timedelta(days=7)),
+            "date_start<": str(day - timedelta(days=1)),
+            "is_cancelled": False,
+        },
     )
+    if len(races) > 1:
+        sys.exit(f"Expected at most one race in the week before {day}, got {races}")
+    if not races:
+        print(f"No race in the week before {day}")
+        return None
+    race = races[0]
+    print(
+        f"Race on {race['date_start'][:10]} in {race['location']} "
+        f"(meeting_key={race['meeting_key']})"
+    )
+    return race
 
 
-def check_source(since: date) -> int:
-    """Check that OpenF1 answers (no live-session lock) and list the race weekends to fetch."""
-    meetings = find_meetings(OpenF1Client(), since)
-    for meeting in meetings:
-        print(
-            f"{meeting['date_start'][:10]}  {meeting['meeting_name']} (meeting_key={meeting['meeting_key']})"
-        )
-    print(f"OpenF1 is reachable: {len(meetings)} finished race weekends since {since}")
-    return len(meetings)
+def check_source() -> None:
+    """Fail if OpenF1 is unreachable or locked by a live session"""
+    resp = httpx.get(
+        f"{BASE_URL}/sessions", params={"session_key": "latest"}, timeout=30
+    )
+    if resp.status_code == 401:
+        sys.exit(f"OpenF1 access denied: {resp.json().get('detail', resp.text)}")
+    resp.raise_for_status()
+    print("OpenF1 is reachable")
 
 
 def slug(text: str) -> str:
@@ -114,11 +130,9 @@ def write_json(path: UPath, data: list | dict) -> None:
     tmp.replace(path)
 
 
-def fetch_to_file(
-    client: OpenF1Client, path: UPath, force: bool, endpoint: str, **params
-) -> int:
+def fetch_to_file(client: OpenF1Client, path: UPath, endpoint: str, **params) -> int:
     """Fetch one endpoint into `path` and return its row count."""
-    if path.exists() and not force:
+    if path.exists():
         rows = len(json.loads(path.read_text(encoding="utf-8")))
         print(f"skip  {path.name:<40} {rows:6d} rows (exists)")
         return rows
@@ -134,7 +148,7 @@ def fetch_to_file(
 
 
 def fetch_car_data(
-    client: OpenF1Client, session_dir: UPath, session_key: int, force: bool
+    client: OpenF1Client, session_dir: UPath, session_key: int
 ) -> dict[str, int]:
     drivers = json.loads((session_dir / "drivers.json").read_text(encoding="utf-8"))
     counts = {}
@@ -143,7 +157,6 @@ def fetch_car_data(
         counts[name] = fetch_to_file(
             client,
             session_dir / f"{name}.json",
-            force,
             "car_data",
             session_key=session_key,
             driver_number=driver_number,
@@ -155,18 +168,14 @@ def fetch_session(
     client: OpenF1Client,
     session: dict,
     meeting_dir: UPath,
-    force: bool,
 ) -> bool:
     session_key = session["session_key"]
     session_dir = meeting_dir / f"{session_key}_{slug(session['session_name'])}"
     print(f"== {session['session_name']} (session_key={session_key}) -> {session_dir}")
     # Keep the marker unchanged so the store step doesn't reload the session.
-    if (session_dir / "_SUCCESS").exists() and not force:
+    if (session_dir / "_SUCCESS").exists():
         print("skip  session (complete)")
         return True
-    # A forced re-fetch removes the marker first: if it fails partway, the session must
-    # not look complete with a mix of old and new files.
-    (session_dir / "_SUCCESS").unlink(missing_ok=True)
 
     counts: dict[str, int] = {}
     failed = False
@@ -175,7 +184,6 @@ def fetch_session(
             counts[endpoint] = fetch_to_file(
                 client,
                 session_dir / f"{endpoint}.json",
-                force,
                 endpoint,
                 session_key=session_key,
             )
@@ -195,7 +203,6 @@ def fetch_session(
             counts["starting_grid"] = fetch_to_file(
                 client,
                 session_dir / "starting_grid.json",
-                force,
                 "starting_grid",
                 session_key=grid_sessions[0]["session_key"],
             )
@@ -205,7 +212,7 @@ def fetch_session(
 
     if "drivers" in counts:
         try:
-            counts |= fetch_car_data(client, session_dir, session_key, force)
+            counts |= fetch_car_data(client, session_dir, session_key)
         except FETCH_ERRORS as exc:
             print(f"FAILED car_data: {exc}", file=sys.stderr)
             failed = True
@@ -227,7 +234,6 @@ def fetch_meeting(
     client: OpenF1Client,
     meeting: dict,
     raw_dir: UPath,
-    force: bool,
 ) -> list[bool]:
     """Fetch the meeting metadata and the `selected` sessions; one result per session."""
     try:
@@ -250,27 +256,17 @@ def fetch_meeting(
     write_json(meeting_dir / "meeting.json", meeting)
     write_json(meeting_dir / "sessions.json", sessions)
 
-    return [fetch_session(client, s, meeting_dir, force) for s in sessions]
+    return [fetch_session(client, s, meeting_dir) for s in sessions]
 
 
-def run(
-    since: date,
-    raw_dir: UPath,
-    force: bool = False,
-) -> int:
-    """Fetch all race weekends since `since` into `raw_dir`; returns the number of failed sessions."""
+def run(meeting_key: int, raw_dir: UPath) -> int:
+    """Fetch one race weekend into `raw_dir`; returns the number of failed sessions."""
     client = OpenF1Client()
 
-    meetings = find_meetings(client, since)
+    meetings = client.get("meetings", {"meeting_key": meeting_key})
     if not meetings:
-        # Normal in weeks without a race: nothing to do is not a failure.
-        print(f"No finished race weekend since {since}, nothing to fetch")
-        return 0
+        sys.exit(f"No meeting with meeting_key={meeting_key}")
 
-    results = []
-    for meeting in meetings:
-        results += fetch_meeting(client, meeting, raw_dir, force)
-    print(
-        f"Fetched {results.count(True)} of {len(results)} sessions from {len(meetings)} meetings into {raw_dir}"
-    )
+    results = fetch_meeting(client, meetings[0], raw_dir)
+    print(f"Fetched {results.count(True)} of {len(results)} sessions into {raw_dir}")
     return results.count(False)
