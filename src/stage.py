@@ -96,7 +96,9 @@ def build_race(
     try:
         for sql_file in sorted((SQL_DIR / stage).glob("*.sql")):
             table = sql_file.stem.split("_", 1)[1]
-            df = spark.sql(sql_file.read_text(encoding="utf-8")).cache()
+            # Computed once and without lineage: later files join several tables built
+            # from the same input, which trips Spark's analyzer (INTERNAL_ERROR) otherwise.
+            df = spark.sql(sql_file.read_text(encoding="utf-8")).localCheckpoint()
             df.createOrReplaceTempView(f"{view_prefix}{table}")
             frames[table] = df
         if report(f"{stage} {session_key}", checks(spark)):
@@ -128,7 +130,8 @@ def run(
             register_inputs(spark, race.session_key)
             build_race(spark, stage, race.session_key, view_prefix, checks)
         except Exception as exc:  # noqa: BLE001 - report the race, build the others
-            error = str(exc).splitlines()[0][:1000]
+            # Java errors start with "An error occurred while calling ...": keep the cause too.
+            error = " ".join(str(exc).split())[:1000]
             print(f"FAILED {stage} {race.session_key}: {error}", file=sys.stderr)
             failed += 1
             continue
