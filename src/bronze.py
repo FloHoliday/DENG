@@ -13,6 +13,7 @@ from pyspark.sql import functions as F
 from pyspark.sql.types import StructType
 from upath import UPath
 
+import stage
 from checks import Check, duplicates, report, sql_check
 from fetch import SESSION_ENDPOINTS
 from spark import lake
@@ -100,9 +101,6 @@ SESSION_TABLES = [*SESSION_ENDPOINTS, "starting_grid", "car_data"]
 KEY_COLUMNS = {"starting_grid": "race_session_key"}
 # Columns added by this step, not by OpenF1.
 EXTRA_COLUMNS = {"race_session_key": "INT NOT NULL", "loaded_at": "TIMESTAMP NOT NULL"}
-# Which _SUCCESS marker each session was loaded from; a newer marker means reload.
-BOOKMARK = "loaded_sessions"
-BOOKMARK_SCHEMA = "session_key INT NOT NULL, completed_at STRING NOT NULL, loaded_at TIMESTAMP NOT NULL"
 # OpenF1 itself sends UNKNOWN for a few stints (e.g. 2024 Lusail).
 COMPOUNDS = ("SOFT", "MEDIUM", "HARD", "INTERMEDIATE", "WET", "UNKNOWN")
 
@@ -193,7 +191,7 @@ def session_checks(spark: SparkSession, counts: dict, expected: dict) -> list[Ch
     return checks
 
 
-def load_session(spark: SparkSession, session_dir: UPath, completed_at: str) -> int:
+def load_session(spark: SparkSession, session_dir: UPath) -> int:
     """Check one session and replace its rows; returns the number of rows loaded."""
     success = read_json(session_dir / "_SUCCESS")
     session_key = int(session_dir.name.split("_")[0])
@@ -232,16 +230,10 @@ def load_session(spark: SparkSession, session_dir: UPath, completed_at: str) -> 
 
         for table, df in meeting.items():
             replace(df, ensure(spark, table), f"meeting_key = {meeting_key}")
-        # The bookmark is written last: a session that fails half-way is loaded again.
         for table, df in frames.items():
             key = KEY_COLUMNS.get(table, "session_key")
             replace(df, ensure(spark, table), f"{key} = {session_key}")
-        bookmark = spark.createDataFrame(
-            [(session_key, completed_at)], "session_key INT, completed_at STRING"
-        ).withColumn("loaded_at", loaded_at)
-        path = table_path(BOOKMARK)
-        ensure_table(spark, path, BOOKMARK_SCHEMA)
-        replace(bookmark, path, f"session_key = {session_key}")
+        stage.set_bookmark(spark, "bronze", session_key)
     finally:
         for df in [*frames.values(), *meeting.values()]:
             df.unpersist()
@@ -254,31 +246,28 @@ def ensure(spark: SparkSession, table: str) -> str:
     return path
 
 
-def loaded_sessions(spark: SparkSession) -> dict[int, str]:
-    """session_key -> completed_at of the _SUCCESS marker it was loaded from."""
-    path = table_path(BOOKMARK)
-    ensure_table(spark, path, BOOKMARK_SCHEMA)
-    rows = spark.read.format("delta").load(path).collect()
-    return {r.session_key: r.completed_at for r in rows}
-
-
 def run(spark: SparkSession, raw_dir: UPath, meeting_key: int | None = None) -> int:
-    """Load every session whose _SUCCESS marker is newer than its last load; returns the number failed.
+    """Load every session whose _SUCCESS is newer than its last load; returns the number failed.
 
     Only the sessions of `meeting_key` are considered, or all of `raw_dir` if it is None.
     A failed session writes nothing and is reported; the sessions after it are still loaded.
     """
-    loaded = loaded_sessions(spark)
+    dirs = {
+        int(m.parent.name.split("_")[0]): m.parent
+        for m in success_markers(raw_dir, meeting_key)
+    }
+    completed = spark.createDataFrame(
+        [(key, read_json(d / "_SUCCESS")["completed_at"]) for key, d in dirs.items()],
+        "session_key INT, completed_at STRING",
+    ).selectExpr("session_key", "CAST(completed_at AS TIMESTAMP) AS built_at")
+    todo = {r.session_key for r in stage.todo(spark, "bronze", completed)}
     count = failed = 0
-    for marker in success_markers(raw_dir, meeting_key):
-        session_dir = marker.parent
-        session_key = int(session_dir.name.split("_")[0])
-        completed_at = read_json(marker)["completed_at"]
-        if loaded.get(session_key) == completed_at:
+    for session_key, session_dir in sorted(dirs.items()):
+        if session_key not in todo:
             print(f"skip  {session_dir} (already loaded)")
             continue
         try:
-            rows = load_session(spark, session_dir, completed_at)
+            rows = load_session(spark, session_dir)
         except Exception as exc:  # noqa: BLE001 - report every failed session, then fail the step
             print(f"FAILED {session_dir}: {exc}", file=sys.stderr)
             failed += 1
