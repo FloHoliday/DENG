@@ -12,7 +12,8 @@ LAKE_URI = os.environ.get("LAKE_URI", "data")
 
 
 def lake(*parts: str) -> UPath:
-    return UPath(LAKE_URI).joinpath(*parts)
+    # Delta only accepts absolute paths in delta.`<path>`.
+    return UPath(LAKE_URI).absolute().joinpath(*parts)
 
 
 def session(app: str) -> SparkSession:
