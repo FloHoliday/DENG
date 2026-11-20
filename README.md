@@ -3,10 +3,16 @@
 DENG HS26 - Florian Item & Florian Leimer
 
 A batch pipeline that loads Formula 1 race data from the [OpenF1 API](https://openf1.org/docs/)
-into PostgreSQL and answers one question for a race strategist: **how do tyre and pit
-strategy and on-track position changes decide race outcomes?** Every driver's result is
-split into the positions won or lost at the start, on track, in the pits and otherwise.
-Kestra runs it every Monday after a race weekend.
+into a Spark + Delta Lake medallion lakehouse (raw → bronze → silver → gold) and answers
+one question for a race strategist: **how do tyre and pit strategy and on-track position
+changes decide race outcomes?** Every driver's result is split into the positions won or
+lost at the start, on track, in the pits and otherwise. Kestra runs it every Monday after
+a race weekend.
+
+> **Status (v1.0 in progress):** the lake runs locally in the Docker volume
+> `deng_raw_data` (`LAKE_URI=/app/data`). Moving it to Google Cloud Storage, and gold to
+> BigQuery, waits for the course's GCP access; the Terraform for it is in
+> [`terraform/`](terraform). v0.2 (PostgreSQL) is tag `v0.2.0`.
 
 **Contents**
 
@@ -18,9 +24,11 @@ Kestra runs it every Monday after a race weekend.
 6. [Pipeline steps](#6-pipeline-steps)
 7. [Data models (transformation)](#7-data-models-transformation)
 8. [Orchestration, reruns and backfills](#8-orchestration-reruns-and-backfills)
-9. [Architecture v0.2](#9-architecture-v02)
-10. [Repository structure](#10-repository-structure)
-11. [Limitations](#11-limitations)
+9. [Architecture v1.0](#9-architecture-v10)
+10. [Evolution: what v1.0 fixes in v0.2](#10-evolution-what-v10-fixes-in-v02)
+11. [Cloud setup (Terraform)](#11-cloud-setup-terraform)
+12. [Repository structure](#12-repository-structure)
+13. [Limitations](#13-limitations)
 
 ---
 
@@ -31,10 +39,11 @@ Python or anything else on your laptop: every step runs in a container.
 
 | Before you start      |                                                                                                                                        |
 |-----------------------|----------------------------------------------------------------------------------------------------------------------------------------|
-| Free disk space       | **at least 25 GB** for the full history (2023 until today): about 13 GB raw JSON + 7 GB database                                       |
-| Time of the first run | **about 2.5 hours** (about 1.5 min per race weekend, 92 race weekends as of October 2026). Later runs only fetch the new race (2 min). |
-| Free ports            | `8080` (Kestra) and `8085` (pgAdmin), see [Troubleshooting](#3-troubleshooting)                                                        |
-| Docker Desktop        | **started and running** for the whole time, keep the laptop awake during the first run                                                 |
+| Free disk space       | **at least 15 GB** for the full history (2023 until today): about 11.5 GB raw JSON + 0.8 GB Delta tables                                  |
+| Memory                | Docker Desktop with **at least 8 GB** (each task runs Spark with a 6 GB driver)                                                         |
+| Time of the first run | **about 8 hours** (about 5 min per race weekend, 92 race weekends as of October 2026). Later runs only add the new race (5 min). |
+| Free port             | `8080` (Kestra), see [Troubleshooting](#3-troubleshooting)                                                                               |
+| Docker Desktop        | **started and running** for the whole time, keep the laptop awake during the first run                                                  |
 
 All commands run **in the repository folder**. They are the same on macOS, Linux and
 Windows PowerShell, unless a step says otherwise.
@@ -65,7 +74,7 @@ Never commit `.env`, git ignores it.
 docker compose config --quiet
 ```
 
-**Expected:** no output. An error like `required variable POSTGRES_PASSWORD is missing a
+**Expected:** no output. An error like `required variable KESTRA_PASSWORD is missing a
 value` names the line in `.env` to fix.
 
 ### Step 4: build the pipeline image and start the services
@@ -77,10 +86,11 @@ docker compose up -d --wait
 ```
 
 The first command builds `deng-f1-code:local`, the image that contains the pipeline
-scripts (Kestra starts every task from it). The second creates the volume for the
-downloaded raw JSON (safe to repeat: an existing volume is kept as it is). The third starts PostgreSQL, pgAdmin,
-Kestra and Kestra's own database. Kestra loads the flow from `orchestration/flows/` by
-itself. It takes 1-2 minutes.
+scripts, Java and Spark with the Delta Lake jars (Kestra starts every task from it; the
+build ends with a Spark smoke test). The second creates the volume for the lake: the
+downloaded raw JSON and the Delta tables (safe to repeat: an existing volume is kept as
+it is). The third starts Kestra and Kestra's own database. Kestra loads the flow from
+`orchestration/flows/` by itself. It takes 1-2 minutes.
 
 **Expected:** the last lines all say `Healthy`, e.g.
 
@@ -100,15 +110,15 @@ itself. It takes 1-2 minutes.
 4. Open an execution's **Gantt** tab to see the tasks and the **Logs** tab to follow
    progress. `fetch` is the long one: it prints one line per downloaded file.
 
-**Expected:** after about 2.5 hours every execution is **SUCCESS**. Race weeks run all
+**Expected:** after about 8 hours every execution is **SUCCESS**. Race weeks run all
 six tasks, weeks without a race stop green after `find_race`:
 
 ```text
-check_source → find_race → fetch → load → transform → validate
+check_source → find_race → fetch → bronze → silver → gold
 ```
 
 > **In a hurry?** Click **Execute** instead and leave `date` empty (or set it to the Monday
-> after a race). That loads one race weekend (about 3 minutes), enough to check that
+> after a race). That loads one race weekend (about 5 minutes), enough to check that
 > everything works. You can backfill the full history later, downloaded races are skipped.
 
 **If a run is interrupted** (laptop asleep, Docker restarted, Wi-Fi gone): start
@@ -123,8 +133,8 @@ race weekend of the past week, as long as Docker is running.
 ```sh
 docker compose stop        # stop everything, keep all data
 docker compose up -d --wait  # start again
-docker compose down -v     # delete the database, the downloaded files stay
-docker volume rm deng_raw_data  # also delete the downloaded files (2.5 h to re-fetch)
+docker compose down -v     # delete Kestra's executions and logs, the lake stays
+docker volume rm deng_raw_data  # also delete the lake: raw files and Delta tables
 ```
 
 ---
@@ -134,85 +144,67 @@ docker volume rm deng_raw_data  # also delete the downloaded files (2.5 h to re-
 ### 2.1 Kestra
 
 The execution of `f1_race_weekend` is **SUCCESS** and all six tasks are green. The
-`validate` task's log ends with `14 of 14 checks passed` (the 13 checks below, plus
-`the race of meeting <meeting_key> is loaded`).
+logs of `bronze`, `silver` and `gold` show one `PASS`/`WARN`/`FAIL` line per check and
+race; a `FAIL` stops that race from being published and fails the task. `silver` and
+`gold` also fail if the race of the run's meeting is not built afterwards (for example
+when `fetch` found nothing to write).
 
 ### 2.2 Run the checks yourself
 
 ```sh
-docker compose run --rm code scripts/validate.py
+docker compose run --rm code scripts/silver.py
+docker compose run --rm code scripts/gold.py
 ```
 
-**Expected output:**
+**Expected output** when nothing changed since the last run:
 
 ```text
-PASS  every fetched session (_SUCCESS) is loaded
-PASS  raw laps: one row per (session, driver, lap)
-PASS  raw stints: one row per (session, driver, stint)
-PASS  raw pit: one row per (session, driver, lap)
-PASS  every loaded race has a result and a starting grid
-PASS  every loaded race is in core.fct_lap
-PASS  telemetry is up to date for every loaded race
-PASS  stint compound is a known value
-PASS  tyre age is never negative
-PASS  every lap is assigned to a stint (max 1 percent missing)
-PASS  every served drive-through penalty is matched to a pit record
-PASS  every loaded race is in mart_race_outcome
-PASS  race outcome split adds up to positions gained
-13 of 13 checks passed
+gold: 0 races to build
+gold: 0 races built, 0 failed
 ```
 
-The SQL checks are in [`sql/verify.sql`](sql/verify.sql), you can also paste that file
-into pgAdmin.
+Every race whose input changed, or that failed before, is rebuilt and checked first;
+the command exits with an error if one fails.
 
 ### 2.3 Query the data
 
-Open a SQL prompt (replace `f1` if you changed `POSTGRES_USER` / `POSTGRES_DB` in `.env`):
-
-```sh
-docker compose exec postgres psql -U f1 -d f1
-```
-
-Or use **pgAdmin** at **http://localhost:8085** (log in with `PGADMIN_DEFAULT_EMAIL` /
-`PGADMIN_DEFAULT_PASSWORD`), then **Servers → Register → Server**: name `F1`, tab *Connection*: host `postgres`, port
-`5432`, database/user/password from your `.env`.
-
-The strategist table is in schema `marts`, which is the default: `SELECT * FROM
-mart_race_outcome` works without a prefix. Raw tables must be named with their schema, e.g.
-`raw.laps`.
+The gold tables are in the BigQuery dataset `gold` of the GCP project
+(`terraform output gold_dataset`). Open the [BigQuery console](https://console.cloud.google.com/bigquery),
+select the project and run the queries below in a new SQL tab. The dataset appears in
+the explorer on the left, where every table has its schema and a row preview.
 
 **Reference race: 2026 Singapore Grand Prix** (`session_key = 11388`). These numbers are
 the same on every machine:
 
 ```sql
-SELECT 'laps' AS table_name, count(*)
-FROM raw.laps
+SELECT 'fct_lap' AS table_name, count(*) AS row_count
+FROM gold.fct_lap
 WHERE session_key = 11388
 UNION ALL
-SELECT 'stints', count(*)
-FROM raw.stints
+SELECT 'fct_stint', count(*)
+FROM gold.fct_stint
 WHERE session_key = 11388
 UNION ALL
-SELECT 'pit', count(*)
-FROM raw.pit
+SELECT 'fct_pit_stop', count(*)
+FROM gold.fct_pit_stop
 WHERE session_key = 11388
 UNION ALL
-SELECT 'intervals', count(*)
-FROM raw.intervals
+SELECT 'fct_lap_telemetry', count(*)
+FROM gold.fct_lap_telemetry
 WHERE session_key = 11388
 UNION ALL
-SELECT 'car_data', count(*)
-FROM raw.car_data
-WHERE session_key = 11388;
+SELECT 'mart_race_outcome', count(*)
+FROM gold.mart_race_outcome
+WHERE session_key = 11388
 ```
 
-| table_name | count  |
-|------------|--------|
-| laps       | 1240   |
-| stints     | 47     |
-| pit        | 25     |
-| intervals  | 28131  |
-| car_data   | 799898 |
+| table_name        | row_count |
+|-------------------|-----------|
+| fct_lap           | 1240      |
+| fct_stint         | 47        |
+| fct_pit_stop      | 25        |
+| fct_lap_telemetry | 1236      |
+| mart_race_outcome | 22        |
 
 Where were positions won and lost in Singapore? Sum of positions moved per cause, over
 all classified finishers:
@@ -224,16 +216,17 @@ SELECT circuit_short_name,
        sum(abs(gained_on_track)) AS moved_on_track,
        sum(abs(gained_in_pits))  AS moved_in_pits,
        sum(abs(gained_other))    AS moved_other
-FROM mart_race_outcome
+FROM gold.mart_race_outcome
 WHERE circuit_short_name = 'Singapore'
-GROUP BY circuit_short_name, season;
+GROUP BY circuit_short_name, season
 ```
 
 | circuit_short_name | season | moved_lap1 | moved_on_track | moved_in_pits | moved_other |
 |--------------------|--------|------------|----------------|---------------|-------------|
 | Singapore          | 2026   | 22         | 40             | 11            | 10          |
 
-With the full history loaded, the same query also returns rows for 2023-2025.
+With the full history loaded, the same query also returns 2023 (20, 29, 35, 39),
+2024 (16, 27, 44, 0) and 2025 (20, 34, 40, 2).
 
 ### 2.4 Look at the raw files
 
@@ -253,8 +246,10 @@ docker run --rm -v deng_raw_data:/from -v "$PWD/raw-copy:/to" deng-f1-code:local
 
 | Problem                                                                        | Cause and fix                                                                                                                                                                                                                                 |
 |--------------------------------------------------------------------------------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `required variable POSTGRES_PASSWORD is missing a value` (or another variable) | `.env` is missing or incomplete. Run step 2 again and compare with `.env.example`.                                                                                                                                                            |
-| `Bind for 127.0.0.1:8080 failed: port is already allocated` (or `8085`)        | Another program or Docker stack uses the port, e.g. the course's Week 5 Kestra. Stop it (`docker ps` shows which container, then `docker stop <name>`), or set `KESTRA_PORT=8081` / `PGADMIN_PORT=8086` in `.env` and open that port instead. |
+| `required variable KESTRA_PASSWORD is missing a value` (or another variable)   | `.env` is missing or incomplete. Run step 2 again and compare with `.env.example`.                                                                                                                                                            |
+| `Bind for 127.0.0.1:8080 failed: port is already allocated`                    | Another program or Docker stack uses the port, e.g. the course's Week 5 Kestra. Stop it (`docker ps` shows which container, then `docker stop <name>`), or set `KESTRA_PORT=8081` in `.env` and open that port instead.                       |
+| A Spark task fails with `Java heap space` or exit code 137                     | Docker Desktop has too little memory. Give it at least 8 GB under *Settings → Resources*, then Restart the execution.                                                                                                                         |
+| `silver` or `gold` fails with `N races failed`                                 | A race failed its build or its checks (the `FAIL` line names the check); it published nothing, all other races were built. Fix the cause, then Restart: failed races are retried.                                                            |
 | `Cannot connect to the Docker daemon` / `docker: command not found`            | Docker Desktop is not running. Start it and wait until it says *running*.                                                                                                                                                                     |
 | http://localhost:8080 does not load                                            | Kestra needs about 30 s after starting. Check `docker compose ps`: `deng-kestra-1` must be `healthy`. If the containers are gone (Docker restarted), run `docker compose up -d --wait`.                                                       |
 | Kestra login fails                                                             | Use exactly `KESTRA_USER` / `KESTRA_PASSWORD` from your `.env`. If you changed them after the first start, run `docker compose up -d --wait` again.                                                                                           |
@@ -262,8 +257,8 @@ docker run --rm -v deng_raw_data:/from -v "$PWD/raw-copy:/to" deng-f1-code:local
 | A task fails with `No such image: deng-f1-code:local`                          | Step 4 was skipped: run `docker compose build code`.                                                                                                                                                                                          |
 | `check_source` fails with `OpenF1 access denied: Live F1 session in progress`  | OpenF1 blocks everything while an F1 session is live. Kestra retries for about 2 h 45 min (15, 30, 60, 60 min). Otherwise restart the execution manually after the session has ended.                                                         |
 | `fetch` fails with `N sessions failed, re-run to resume`                       | The API was overloaded or offline. Kestra already tried 4 times. Restart the execution later, finished sessions are skipped.                                                                                                                  |
-| `validate` fails                                                               | A data check failed (the log says which). The data stays in the database for investigation. Please open an issue with the log.                                                                                                                |
-| `no space left on device`                                                      | The full history needs about 20 GB. Free disk space (or increase Docker Desktop's disk limit under *Settings → Resources*), then Restart the execution.                                                                                       |
+| `silver` or `gold` fails with `the race of meeting KEY is not built`           | `fetch` or `bronze` wrote nothing for that race, or it failed in an earlier stage (the log says which). Please open an issue with the log.                                                                                                     |
+| `no space left on device`                                                      | The full history needs about 15 GB. Free disk space (or increase Docker Desktop's disk limit under *Settings → Resources*), then Restart the execution.                                                                                       |
 
 ---
 
@@ -278,9 +273,9 @@ expect at the next race) and **season** (trends), that answer the question from 
 
 > How do tyre and pit strategy and on-track position changes actually decide race outcomes?
 
-**Data product:** `marts.mart_race_outcome`, one row per driver per race (see
+**Data product:** `mart_race_outcome` in gold, one row per driver per race (see
 [Data models](#7-data-models-transformation)), built on lap-, stint-, pit-stop- and
-result-level fact tables in schema `core`. The core tables (one row per driver per lap,
+result-level fact tables, also in gold. The core tables (one row per driver per lap,
 stint, stop or race) also serve a possible ML use case.
 
 ## 5. Data source
@@ -302,10 +297,12 @@ stint, stop or race) also serve a possible ML use case.
   `team_radio` (coverage dropped in 2026).
 - **Volume:** most endpoints have tens to a few thousand rows per race. `intervals` about
   28,000, `car_data` about 800,000 rows (about 150 MB of JSON) per race.
-- **Update behaviour:** a new race appears after each race weekend. Finished races were
-  checked to be static: the 2026 Singapore race fetched 3 and 6 days after the race gave
-  byte-identical files for all 32 endpoints/drivers.
-- **Known data-quality issues** (handled in the staging views):
+- **Update behaviour:** a new race appears after each race weekend. Most finished races
+  stay the same (the 2026 Singapore race fetched 3 and 6 days later was byte-identical),
+  but not all: re-fetching 2026 Bahrain on 20 Nov 2026 showed corrected `stints` (tyre
+  ages) and `pit` (`stop_duration` filled in). The pipeline does not pick these up yet
+  (see [Limitations](#13-limitations)).
+- **Known data-quality issues** (handled in silver):
     - `throttle` goes up to 104 (about 10 % of samples), `brake` is 0/100/104.
     - `gap_to_leader` / `interval` are seconds or text like `+1 LAP`.
     - OpenF1 labels Sprints `session_type = 'Race'`, `session_name` is used instead.
@@ -313,26 +310,41 @@ stint, stop or race) also serve a possible ML use case.
       exists from the 2024 US GP on.
     - one stint has no compound, 66 laps have no `lap_duration`.
     - `drs` is empty in 2026 (new regulations without DRS).
+    - `n_gear` has glitches from 9 up to 200+ (about 1 in 10,000 samples in some races),
+      set to NULL.
 
 ## 6. Pipeline steps
 
 One flow, six tasks. Each task runs one script from [`scripts/`](scripts) in its own
-container from the project image. The logic lives in [`src/`](src).
+container from the project image. The logic lives in [`src/`](src). `LAKE_URI` (default
+`data`, in Kestra `/app/data`) is the root of the lake: `raw/`, `bronze/`, `silver/`,
+`gold/`.
 
-| # | Task           | Script                          | What it does                                                                                                                                       | Fails when                                    | Retry |
-|---|----------------|---------------------------------|----------------------------------------------------------------------------------------------------------------------------------------------------|-----------------------------------------------|-------|
-| 1 | `check_source` | `check_source.py`               | Sends one tiny request to check that OpenF1 answers                                                                                                | API down or locked by a live session          | yes   |
-| 2 | `find_race`    | `find_race.py [--date DATE]`    | Asks OpenF1 for the finished Race in the 7 days before `DATE` and outputs its `meeting_key` to Kestra                                              | more than one race found                      | no    |
-| 3 | `fetch`        | `fetch.py --meeting-key KEY`    | Downloads every endpoint of that weekend's Race into `data/raw/<year>/<meeting>/<session>/` (in the Docker volume `deng_raw_data`), unchanged JSON | any session incomplete                        | yes   |
-| 4 | `load`         | `load.py`                       | Loads every complete session into typed tables in schema `raw`                                                                                     | wrong type, unknown field, row-count mismatch | no    |
-| 5 | `transform`    | `transform.py [--full-refresh]` | Rebuilds the `staging`, `core` and `marts` models from [`sql/transform/`](sql/transform)                                                           | SQL error, duplicate key on a model's grain   | no    |
-| 6 | `validate`     | `validate.py`                   | Runs the checks in [`sql/verify.sql`](sql/verify.sql) plus raw-files-vs-database                                                                   | any check fails                               | no    |
+| # | Task           | Script                                            | What it does                                                                                                                  | Fails when                                         | Retry |
+|---|----------------|---------------------------------------------------|-------------------------------------------------------------------------------------------------------------------------------|----------------------------------------------------|-------|
+| 1 | `check_source` | `check_source.py`                                 | Sends one tiny request to check that OpenF1 answers                                                                           | API down or locked by a live session               | yes   |
+| 2 | `find_race`    | `find_race.py [--date DATE]`                      | Asks OpenF1 for the finished Race in the 7 days before `DATE` and outputs its `meeting_key` to Kestra                         | more than one race found                           | no    |
+| 3 | `fetch`        | `fetch.py --meeting-key KEY`                      | Downloads every endpoint of that weekend's Race into `raw/<year>/<meeting>/<session>/` as JSON                                | any session incomplete                             | yes   |
+| 4 | `bronze`       | `bronze.py --meeting-key KEY`                     | Checks every new session and loads it into typed Delta tables                                                                 | a session fails (type, unknown field, check)       | no    |
+| 5 | `silver`       | `silver.py --meeting-key KEY`                     | Cleans and conforms that weekend's race if its bronze data changed ([`sql/silver/`](sql/silver))                              | the race fails its build or checks, or is missing  | no    |
+| 6 | `gold`         | `gold.py --meeting-key KEY`                       | Builds the facts and the mart of that weekend's race if its silver data changed ([`sql/gold/`](sql/gold))                     | the race fails its build or checks, or is missing  | no    |
 
 Only `check_source` (exponential, 15 min → 1 h, 5 attempts) and `fetch` (5 min → 1 h,
 4 attempts) are retried by Kestra. `find_race` runs right after a successful
-`check_source`, so it only retries its HTTP request (`tenacity`). The other three
+`check_source`, so it only retries its HTTP request (`tenacity`). The other four
 fail for permanent reasons (bad data, bad SQL), where a retry would only repeat the
 failure.
+
+**Write → audit → publish:** bronze, silver and gold check each race's data *before*
+writing it. A failed `error` check publishes nothing for that race, so a reader never sees
+it; a `warn` check is only logged. All checks print in one format, e.g.
+`PASS  gold 9165: fct_lap: one row per (session_key, driver_number, lap_number)`.
+
+| Stage  | Checks (error = blocks the race, warn = logged)                                                                                                                                                                               |
+|--------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| bronze | rows = `_SUCCESS` counts · one row per key: laps, stints, pit · race has a result and a starting grid · compound in the known set · warn: drivers outside 18–22, grid shorter than the driver list                                |
+| silver | speed 0–400, `throttle_pct` 0–100, `n_gear` 0–8, tyre age ≥ 0 · every gap is seconds or `+N LAP(S)` · warn: timestamps more than 2 h outside the race, `n_gear` glitches set to NULL                                           |
+| gold   | one row per key in every table · every race has laps, telemetry, stints, results and the mart · ≤ 5 % of laps without a stint (warn > 1 %) · tyre age ≥ 0 · served penalties matched to a pit record · outcome split adds up |
 
 **Fail fast:** if `fetch` cannot complete every session, the run stops there and nothing
 is loaded. A rerun skips everything that is already complete.
@@ -348,25 +360,33 @@ is loaded. A rerun skips everything that is already complete.
 - A week without a race is not an error: `find_race` outputs `meeting_key: null`
   and the execution ends successfully without running the later steps.
 
-### 6.2 Load (storage)
+### 6.2 Bronze (storage)
 
-- Schema-on-write: one table per endpoint in schema `raw` with one typed column per
-  API field ([`sql/schema.sql`](sql/schema.sql)). A new, renamed or wrongly typed field
-  fails the session's load instead of slipping through.
-- **One transaction per session:** delete the session's rows, insert them again, compare
-  every table's row count with `_SUCCESS`. On any error the session is rolled back and
-  its earlier rows stay.
-- **Incremental:** `raw.loaded_sessions` records which `_SUCCESS` marker each session
-  was loaded from. Only new or re-fetched sessions are loaded.
-- **Scoped:** Kestra passes the `meeting_key` to `load` and `validate`, so they only look
-  at that meeting's folder. Without `--meeting-key` they scan all of `data/raw`, e.g. to
-  catch up on a session that failed to load earlier.
+- Schema-on-write: one Delta table per endpoint in `bronze/` with one typed column per
+  API field ([`src/bronze.py`](src/bronze.py)). A new, renamed or wrongly typed field
+  fails the session instead of slipping through.
+- **Per session:** read the files, run the bronze checks, then replace only that
+  session's rows (`replaceWhere session_key = …`, one Delta commit per table). Other races
+  are never touched.
+- **Incremental:** `bronze/built_sessions` records when each session was loaded; a session
+  is loaded again only if its `_SUCCESS` is newer. It is written last, so a session that
+  fails half-way is loaded again.
+- **Scoped:** Kestra passes the `meeting_key` to bronze, silver and gold.
+  Without `--meeting-key`, `bronze.py` scans all of `raw/`, e.g. to catch up.
+- No partitioning: one Parquet file per race and table (a race's `car_data` is about
+  3 MB, from about 150 MB of JSON), found through Delta's min/max statistics.
 
-### 6.3 Transform and validate
+### 6.3 Silver and gold (transformation)
 
-See [Data models](#7-data-models-transformation). The transform runs all files in
-`sql/transform/` in name order **in one transaction**: until it commits, queries see the
-previous version of every model.
+See [Data models](#7-data-models-transformation). Both work **per race**:
+`<stage>/built_sessions` records when each race was last built successfully. A race is
+rebuilt if the stage before built it more recently (bronze for silver, silver for gold)
+or if it has no row yet. A race that fails writes no row, so the next run retries it. Each race runs every SQL file of the stage in name order, is checked as a whole
+and then replaces its rows in every table. Readers see the previous version until then.
+With `--meeting-key`, only that meeting's race is considered, and the step fails if it
+is not built afterwards. Without it, every changed or failed race is built, e.g. to retry
+an old race after a fix. `--full-refresh` deletes the stage and rebuilds all races
+(needed after changing the SQL).
 
 ### 6.4 Running a step without Kestra
 
@@ -376,9 +396,10 @@ Every task can also be run by hand (handy for development):
 docker compose run --rm code scripts/check_source.py
 docker compose run --rm code scripts/find_race.py --date 2026-10-13  # prints the meeting_key
 docker compose run --rm code scripts/fetch.py --meeting-key <meeting_key>
-docker compose run --rm code scripts/load.py --meeting-key <meeting_key>  # omit: all of data/raw
-docker compose run --rm code scripts/transform.py
-docker compose run --rm code scripts/validate.py --meeting-key <meeting_key>  # omit: all of data/raw
+docker compose run --rm code scripts/bronze.py --meeting-key <meeting_key>  # omit: all of raw/
+docker compose run --rm code scripts/silver.py --meeting-key <meeting_key>  # omit: every changed race
+docker compose run --rm code scripts/gold.py --meeting-key <meeting_key>  # omit: every changed race
+docker compose run --rm code scripts/smoke_spark.py  # Spark + Delta work in the image
 ```
 
 After changing Python code or SQL files, rebuild the image (`docker compose build code`)
@@ -386,22 +407,25 @@ so that Kestra and `docker compose run` use the new version.
 
 ## 7. Data models (transformation)
 
-ELT: the data is loaded unchanged first, then transformed with SQL inside PostgreSQL.
+ELT on a medallion lakehouse: the data is stored as received first, then typed, cleaned
+and modelled with Spark SQL, one race at a time.
 
 ```text
-raw  (typed tables)  →  staging (views)  →  core (facts)  →  marts (for the strategist)
+raw (JSON files)  →  bronze (typed)  →  silver (cleaned)  →  gold (facts + mart, for the strategist)
 ```
 
-| Layer     | Materialization                                                                                  | Why                                                                                                                                                                    |
-|-----------|--------------------------------------------------------------------------------------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `staging` | plain views                                                                                      | renaming, typing and cleaning only, no copy of the data                                                                                                                |
-| `core`    | materialized views with a unique index on the grain. `fct_lap_telemetry` is an incremental table | the unique index makes a build with duplicate rows fail. Telemetry is the only large input (about 0.8M rows per race) and is only recomputed for new or reloaded races |
-| `marts`   | materialized views with a unique index on the grain                                              | small, pre-aggregated, fast to query                                                                                                                                   |
+| Layer    | Format                         | Content                                                                                       |
+|----------|--------------------------------|-----------------------------------------------------------------------------------------------|
+| `raw`    | JSON files + `_SUCCESS`        | the API responses, unchanged                                                                  |
+| `bronze` | Delta tables, one per endpoint | one typed column per API field, schema enforced on write                                      |
+| `silver` | Delta tables, one per endpoint | renaming, typing and cleaning only, no joins ([`sql/silver/`](sql/silver))                    |
+| `gold`   | Delta tables                   | the facts and the mart ([`sql/gold/`](sql/gold)); moves to BigQuery once GCP is available    |
 
-Views and materialized views are dropped and rebuilt on every run, so a rerun always
-gives the same result and a changed definition is picked up automatically.
+Delta Lake adds ACID commits, schema enforcement and time travel on top of Parquet:
+`replaceWhere` swaps one race's rows in one commit, and `DESCRIBE HISTORY` shows every
+write. Delta does not enforce primary keys, so each stage checks the grain itself.
 
-### 7.1 Core models (schema `core`)
+### 7.1 Facts (gold)
 
 | Model                  | Grain                                         | Content                                                                                                               |
 |------------------------|-----------------------------------------------|-----------------------------------------------------------------------------------------------------------------------|
@@ -435,11 +459,11 @@ gives the same result and a changed definition is picked up automatically.
 - Degradation per stint = slope of fuel-corrected lap time over tyre age (clean laps
   only, at least 5), so every driver is only compared with themselves.
 
-### 7.2 Mart (schema `marts`)
+### 7.2 Mart (gold)
 
 `mart_race_outcome`, grain (race, driver). It splits each driver's result,
-`positions_gained = grid - finish`, into four parts that add up exactly (a validate check
-fails the run otherwise), positive = positions won:
+`positions_gained = grid - finish`, into four parts that add up exactly (a gold check
+blocks the race otherwise), positive = positions won:
 
 | Column            | Positions won or lost ...                                                                                                       | Built from                                                                 |
 |-------------------|---------------------------------------------------------------------------------------------------------------------------------|----------------------------------------------------------------------------|
@@ -466,10 +490,10 @@ SELECT name_acronym,
        gained_other,
        strategy,
        n_stops
-FROM mart_race_outcome
+FROM gold.mart_race_outcome
 WHERE circuit_short_name = 'Singapore'
   AND season = 2026
-ORDER BY finish_position LIMIT 8;
+ORDER BY finish_position NULLS LAST LIMIT 8
 ```
 
 ## 8. Orchestration, reruns and backfills
@@ -481,7 +505,7 @@ so every way of running the flow again is safe:
 | Situation                         | What to do                                                                                                          | Why it is safe                                                             |
 |-----------------------------------|---------------------------------------------------------------------------------------------------------------------|----------------------------------------------------------------------------|
 | Weekly run                        | nothing: schedule `0 6 * * 1` (Monday 06:00, Europe/Zurich), loads the race of the 7 days before the scheduled date | the weekend's race is finished, and no session is live on Monday morning   |
-| A task failed                     | open the execution → **Restart** (continues at the failed task)                                                     | finished sessions are skipped, each session is replaced in one transaction |
+| A task failed                     | open the execution → **Restart** (continues at the failed task)                                                     | finished sessions and races are skipped, each race is replaced in one commit per table |
 | Missed Mondays (Docker was off)   | **Triggers** tab → `monday_after_race_weekend` → **Backfill executions** with a date range                          | each backfill run uses its own scheduled date, not today                   |
 | Full history or a specific period | **Backfill executions** from e.g. `2023-01-01`. One race: **Execute** with `date` = the Monday after it             | one race per execution, already loaded races are skipped                   |
 | Two runs at once                  | they queue (`concurrency: limit 1`)                                                                                 | they never write the same files or rows at the same time                   |
@@ -491,14 +515,16 @@ Kestra watches `orchestration/flows/` (mounted to `/flows`, see
 start-up and updated within seconds whenever the file is saved. The file name must start
 with `main_`, because Kestra 1.3 takes the tenant from the part before the first `_`.
 
-## 9. Architecture v0.2
+## 9. Architecture v1.0
 
-Changes since v0.1:
+Changes since v0.2:
 
-- The orchestrator is Kestra, not asset-based.
-- The steps are separate tasks, with a source check before them and validation after.
-- The transformation is plain SQL in PostgreSQL, not dbt.
-- Telemetry is aggregated incrementally.
+- PostgreSQL is gone (v0.2 stays available as tag `v0.2.0`). Storage is a medallion
+  lakehouse: raw JSON files, then bronze, silver and gold Delta tables.
+- Spark (PySpark 4.1, `local[*]`: driver and executors in one process per task) replaces
+  SQL in PostgreSQL; the models are the same SQL, ported to Spark SQL.
+- Every stage works per race and only on new or changed races, and checks a race before
+  publishing it.
 
 ```mermaid
 flowchart LR
@@ -506,53 +532,77 @@ flowchart LR
 
     subgraph kestra["Kestra: weekly schedule, retries, restart, backfill, 1 run at a time"]
         direction LR
-        check["1 check_source<br/>API reachable?"]
-        find["2 find_race<br/>race last week?"]
-        fetch["3 fetch<br/>Python, rate-limited<br/>_SUCCESS per session"]
-        load["4 load<br/>replace per session<br/>in 1 transaction"]
-        transform["5 transform<br/>SQL: staging → core → marts"]
-        validate["6 validate<br/>sql/verify.sql"]
-        check --> find --> fetch --> load --> transform --> validate
+        check["1 check_source"]
+        find["2 find_race"]
+        fetch["3 fetch"]
+        bronze["4 bronze<br/>typed, checked"]
+        silver["5 silver<br/>cleaned, checked"]
+        gold["6 gold<br/>facts + mart, checked"]
+        check --> find --> fetch --> bronze --> silver --> gold
     end
 
-    raw[("data/raw<br/>immutable JSON files<br/>volume deng_raw_data")]
-    subgraph pg["PostgreSQL (Docker Compose)"]
-        rawdb[("raw<br/>typed tables")]
-        staging[("staging<br/>views")]
-        core[("core<br/>facts, telemetry")]
-        marts[("marts<br/>strategist tables")]
+    subgraph lake["Lake: LAKE_URI (volume deng_raw_data, later gs://bucket)"]
+        raw[("raw/<br/>JSON + _SUCCESS")]
+        b[("bronze/<br/>Delta")]
+        s[("silver/<br/>Delta")]
+        g[("gold/<br/>Delta, later BigQuery")]
     end
-    user["Strategist<br/>pgAdmin / SQL"]
-    source --> check
-    source --> find
-    source --> fetch
-    fetch --> raw --> load --> rawdb
-    transform -.-> staging & core & marts
-    marts --> user
+    user["Strategist<br/>BigQuery console"]
+    source --> check & find & fetch
+    fetch --> raw --> bronze --> b --> silver --> s --> gold --> g --> user
 ```
 
-**Runtime (Docker Compose, project `deng`, network `deng_default`):**
+**Runtime (Docker Compose, project `deng`):**
 
 | Service           | Purpose                                                                                                         |
 |-------------------|-----------------------------------------------------------------------------------------------------------------|
-| `postgres`        | project database (the F1 data)                                                                                  |
-| `pgadmin`         | browser UI for the database, http://localhost:8085                                                              |
 | `kestra`          | orchestrator UI and scheduler, http://localhost:8080. Starts each task as a container through the Docker socket |
-| `kestra-postgres` | Kestra's own metadata (flows, executions, logs), separate from the F1 data                                      |
-| `code`            | the pipeline image `deng-f1-code:local`, used for Kestra's tasks and for `docker compose run`                   |
+| `kestra-postgres` | Kestra's own metadata (flows, executions, logs)                                                                 |
+| `code`            | the pipeline image `deng-f1-code:local` (Python, Java 21, Spark, Delta), for Kestra's tasks and `docker compose run` |
 
-`postgres`, `kestra-postgres` and `kestra` restart automatically with Docker (`restart: unless-stopped`), so the Monday
+`kestra-postgres` and `kestra` restart automatically with Docker (`restart: unless-stopped`), so the Monday
 schedule survives a Docker restart.
-
-**Final project (outlook):** the same steps load into BigQuery instead of PostgreSQL (`--raw-dir gs://…` is already
-supported by the fetch and load steps), provisioned with
-Terraform.
 
 Security note: Kestra has access to the Docker socket so it can start task containers.
 That is fine for a local single-user setup, but anyone who can edit flows can control
 Docker. All ports are bound to `127.0.0.1`.
 
-## 10. Repository structure
+## 10. Evolution: what v1.0 fixes in v0.2
+
+Problems we found in v0.2 (and verified) and how v1.0 fixes them:
+
+| #  | Weakness of v0.2                                                                                                                                                                                                                                                                                                      | Fix in v1.0                                                                                                                                                                                                                          |
+|----|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| W1 | **Validation only at the end.** `validate` ran after `transform` had committed, so a failed check left bad data already published to the strategist, and bronze problems surfaced only after the models were built on them.                                                                                         | Checks in every stage, run on a race's data **before** it is written (write → audit → publish), with severity error/warn and one report format.                                                                                     |
+| W2 | **Models dropped and rebuilt on every run** (`DROP SCHEMA … CASCADE`): every run recomputed all races to add one, readers were blocked until the commit (the README claimed they saw the previous version), `CASCADE` silently deleted an analyst's view on the mart, and no run recorded what it rebuilt. | Persistent tables, updated **per race**: only races with a newer input are rebuilt (`replaceWhere`), readers keep the old version until the race's commit, each run logs the races it built, a definition change needs `--full-refresh`. |
+| W4 | **One bad race blocked everything.** The transform built all races in one transaction: one duplicate key failed it, and because the bad race stayed in `raw`, every later run failed too.                                                                                                                         | Each race is built and checked on its own; a failed race publishes nothing and is retried in the next run, all other races are published. The run still ends red and names the race. A code bug still fails every race, as it should.   |
+
+## 11. Cloud setup (Terraform)
+
+[`terraform/`](terraform) describes the GCP resources: the lake bucket (object versioning
+as a safety net for raw files, old versions deleted after 90 days), the BigQuery dataset
+`gold`, and a service account with access to only that bucket and dataset (plus running
+BigQuery jobs). Bucket and dataset are in `europe-west6` (Zurich). It is checked
+(`terraform validate`) but not yet applied, because GCP access is still pending.
+
+```sh
+cd terraform
+cp terraform.tfvars.example terraform.tfvars   # fill in project_id and bucket_name
+terraform init && terraform apply
+```
+
+- **State:** local (`terraform.tfstate`, git-ignored). A remote backend would need a
+  bucket before Terraform exists, and only one of us applies.
+- **Credentials:** the service-account key is created by hand
+  (`gcloud iam service-accounts keys create f1-pipeline-key.json --iam-account <service_account output>`),
+  never by Terraform, so it is not in the state. It stays outside the repo (`*-key.json`
+  is git-ignored) and is mounted into the task containers. Application Default
+  Credentials (`gcloud auth application-default login`) work as well.
+- **Moving the lake:** copy `raw/` from the volume to the bucket once (no API requests),
+  then set `LAKE_URI` to the `lake_uri` output. The GCS and BigQuery connectors are added
+  to the image in that step.
+
+## 12. Repository structure
 
 ```text
 ├── README.md
@@ -563,18 +613,19 @@ Docker. All ports are bound to `127.0.0.1`.
 ├── orchestration/
 │   ├── application.yaml      Kestra server configuration (mounted into the kestra container)
 │   └── flows/                Kestra flow main_f1_race_weekend.yaml
-├── scripts/                  one entry point per pipeline step
-├── src/                      fetch.py, load.py, transform.py, validate.py
+├── scripts/                  one entry point per pipeline step, plus smoke_spark.py
+├── src/                      fetch.py, bronze.py, silver.py, gold.py,
+│                             stage.py (per-race build), checks.py, spark.py (session, LAKE_URI)
 ├── sql/
-│   ├── schema.sql            raw tables (load step)
-│   ├── transform/            staging, core and mart models, run in name order
-│   └── verify.sql            data checks (validate step)
+│   ├── silver/               one SELECT per silver table
+│   └── gold/                 one SELECT per fact and the mart, run in name order
+└── terraform/                GCP bucket, BigQuery dataset, service account
 ```
 
-The downloaded raw JSON is not in the repo folder: it lives in the Docker volume
-`deng_raw_data` (see 2.4).
+The lake is not in the repo folder: it lives in the Docker volume `deng_raw_data`
+(see 2.4).
 
-## 11. Limitations
+## 13. Limitations
 
 - OpenF1 is unofficial, community-run, has no SLA and a 3 requests/second limit. It is
   completely unavailable during live F1 sessions.
@@ -596,5 +647,14 @@ The downloaded raw JSON is not in the repo folder: it lives in the Docker volume
   not from stop counts.
 - With one race per circuit and season, per-circuit conclusions rest on small samples. More seasons (2023-2025) make
   them more reliable.
-- Materialized views are fully rebuilt on every run (simple and idempotent, cheap at
-  this size). Only telemetry is incremental.
+- Spark is heavy for this data size (a race is about 1M rows): each task starts a JVM,
+  so one race takes about 3.5 minutes instead of v0.2's 3 (fetch about 1 min, each Spark
+  stage 30-60 s). It runs locally in one process (`local[*]`), not on a cluster.
+- A fetched session is never fetched again, so a later OpenF1 correction (seen in 2026
+  Bahrain: `stints` tyre ages, `pit` `stop_duration`) does not reach the mart. To pick it
+  up, delete that session's folder in `raw/` and rerun the race: the new `_SUCCESS`
+  makes every stage rebuild it.
+- A race's tables are replaced one Delta commit per table, not in one transaction across
+  tables. The bookmark is written last, so a race that fails half-way is rebuilt.
+- The star-schema keys and the BigQuery partitioning/clustering follow after the
+  modelling lecture; for now the facts use the natural keys and carry the driver's names.
