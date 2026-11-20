@@ -118,10 +118,23 @@ def run(
     view_prefix: str,
     checks: Callable[[SparkSession], list[Check]],
     full_refresh: bool = False,
+    meeting_key: int | None = None,
 ) -> int:
-    """Build every race that is newer in `upstream`; returns the number of races that failed."""
+    """Build every race that is newer in `upstream`; returns the number of races that failed.
+
+    With `meeting_key`, only that meeting's race is considered, and it counts as failed
+    if it is not built afterwards (for example because fetch or bronze wrote nothing).
+    """
     if full_refresh:
         drop_stage(stage)
+    if meeting_key is not None:
+        meeting = (
+            spark.read.format("delta")
+            .load(path("bronze", "sessions"))
+            .where(f"meeting_key = {int(meeting_key)}")
+            .select("session_key")
+        )
+        upstream = upstream.join(meeting, "session_key")
     races = todo(spark, stage, upstream)
     print(f"{stage}: {len(races)} races to build")
     failed = 0
@@ -138,4 +151,15 @@ def run(
         set_bookmark(spark, stage, race.session_key)
         print(f"built {stage} {race.session_key}")
     print(f"{stage}: {len(races) - failed} races built, {failed} failed")
+    built = bookmarks(spark, stage).select("session_key")
+    if (
+        not failed
+        and meeting_key is not None
+        and upstream.join(built, "session_key").isEmpty()
+    ):
+        print(
+            f"FAILED {stage}: the race of meeting {meeting_key} is not built",
+            file=sys.stderr,
+        )
+        failed += 1
     return failed

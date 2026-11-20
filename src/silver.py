@@ -100,7 +100,9 @@ def checks(spark: SparkSession) -> list[Check]:
     ]
 
 
-def run(spark: SparkSession, full_refresh: bool = False) -> int:
+def run(
+    spark: SparkSession, full_refresh: bool = False, meeting_key: int | None = None
+) -> int:
     return stage.run(
         spark,
         STAGE,
@@ -109,4 +111,5 @@ def run(spark: SparkSession, full_refresh: bool = False) -> int:
         "silver_",
         checks,
         full_refresh,
+        meeting_key,
     )

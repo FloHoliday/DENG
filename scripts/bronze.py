@@ -17,6 +17,7 @@ if __name__ == "__main__":
         help="OpenF1 meeting_key of the race weekend to load, default: every meeting in raw/",
     )
     args = parser.parse_args()
+
     spark = lakehouse.session("bronze")
     failed = bronze.run(spark, lakehouse.lake("raw"), args.meeting_key)
     spark.stop()
