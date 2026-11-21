@@ -316,7 +316,7 @@ stint, stop or race) also serve a possible ML use case.
 ## 6. Pipeline steps
 
 One flow, six tasks. Each task runs one script from [`scripts/`](scripts) in its own
-container from the project image. The logic lives in [`src/`](src). `LAKE_URI` (default
+container from the project image. The logic lives in the package [`src/deng_f1/`](src/deng_f1). `LAKE_URI` (default
 `data`, in Kestra `/app/data`) is the root of the lake: `raw/`, `bronze/`, `silver/`,
 `gold/`.
 
@@ -363,7 +363,7 @@ is loaded. A rerun skips everything that is already complete.
 ### 6.2 Bronze (storage)
 
 - Schema-on-write: one Delta table per endpoint in `bronze/` with one typed column per
-  API field ([`src/bronze.py`](src/bronze.py)). A new, renamed or wrongly typed field
+  API field ([`src/deng_f1/bronze.py`](src/deng_f1/bronze.py)). A new, renamed or wrongly typed field
   fails the session instead of slipping through.
 - **Per session:** read the files, run the bronze checks, then replace only that
   session's rows (`replaceWhere session_key = …`, one Delta commit per table). Other races
@@ -614,7 +614,7 @@ terraform init && terraform apply
 │   ├── application.yaml      Kestra server configuration (mounted into the kestra container)
 │   └── flows/                Kestra flow main_f1_race_weekend.yaml
 ├── scripts/                  one entry point per pipeline step, plus smoke_spark.py
-├── src/                      fetch.py, bronze.py, silver.py, gold.py,
+├── src/deng_f1/              fetch.py, bronze.py, silver.py, gold.py,
 │                             stage.py (per-race build), checks.py, spark.py (session, LAKE_URI)
 ├── sql/
 │   ├── silver/               one SELECT per silver table

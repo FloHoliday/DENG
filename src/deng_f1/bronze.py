@@ -13,10 +13,10 @@ from pyspark.sql import functions as F
 from pyspark.sql.types import StructType
 from upath import UPath
 
-import stage
-from checks import Check, duplicates, report, sql_check
-from fetch import SESSION_ENDPOINTS
-from spark import lake
+from . import stage
+from .checks import Check, duplicates, report, sql_check
+from .fetch import SESSION_ENDPOINTS
+from .spark import lake
 
 # One typed column per OpenF1 field (from the v0.2 PostgreSQL schema). meetings and
 # sessions are replaced per meeting_key; all other tables per (Race) session_key.

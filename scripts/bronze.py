@@ -6,8 +6,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parents[1] / "src"))
 
-import bronze
-import spark as lakehouse
+from deng_f1 import bronze
+from deng_f1 import spark as lakehouse
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)

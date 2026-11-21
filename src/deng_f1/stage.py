@@ -13,10 +13,10 @@ from pathlib import Path
 
 from pyspark.sql import DataFrame, SparkSession
 
-from checks import Check, report
-from spark import lake
+from .checks import Check, report
+from .spark import lake
 
-SQL_DIR = Path(__file__).parents[1] / "sql"
+SQL_DIR = Path(__file__).parents[2] / "sql"
 # <stage>/built_sessions: when each session (bronze) or race was last built successfully.
 BOOKMARK_SCHEMA = "session_key INT NOT NULL, built_at TIMESTAMP NOT NULL"
 

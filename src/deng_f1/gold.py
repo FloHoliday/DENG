@@ -6,8 +6,8 @@ a whole before any of its tables is published; readers keep the previous version
 
 from pyspark.sql import DataFrame, SparkSession
 
-import stage
-from checks import Check, duplicates, sql_check
+from . import stage
+from .checks import Check, duplicates, sql_check
 
 STAGE = "gold"
 SILVER_TABLES = [

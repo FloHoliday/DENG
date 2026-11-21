@@ -6,9 +6,8 @@ The SQL in sql/silver/ only renames, types and cleans one bronze table each, no 
 
 from pyspark.sql import DataFrame, SparkSession
 
-import bronze
-import stage
-from checks import Check, sql_check
+from . import bronze, stage
+from .checks import Check, sql_check
 
 STAGE = "silver"
 # A timestamp this far outside the race's start and end is flagged; car data starts
