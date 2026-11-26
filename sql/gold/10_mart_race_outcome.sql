@@ -2,7 +2,7 @@
 -- Grain: (session_key, driver_number). One row per driver per race.
 --
 -- positions_gained (grid - finish) is split into four parts that add up exactly
--- (checked in sql/verify.sql); positive = positions won:
+-- (checked by the gold step); positive = positions won:
 --   gained_lap1      start and first lap: grid - position at the end of lap 1
 --   gained_on_track  overtakes under green flag (made minus suffered), laps 2 to the end
 --   gained_in_pits   swaps where one of the two cars was on a pit in- or out-lap: positions
@@ -12,68 +12,67 @@
 --                    last lap and the official result (time penalties)
 -- The split is only filled for classified finishers with a grid position.
 -- The strategy columns describe what the driver did, as features for analysis or ML.
-CREATE SCHEMA IF NOT EXISTS marts;
-
-CREATE MATERIALIZED VIEW marts.mart_race_outcome AS
 WITH last_lap AS (
-    SELECT DISTINCT ON (session_key, driver_number)
-        session_key,
-        driver_number,
-        lap_number AS last_lap,
-        position AS last_lap_position
-    FROM core.fct_lap_position
-    ORDER BY session_key, driver_number, lap_number DESC
+    SELECT session_key, driver_number, last_lap, last_lap_position
+    FROM (
+        SELECT
+            session_key,
+            driver_number,
+            lap_number AS last_lap,
+            position AS last_lap_position,
+            row_number() OVER (
+                PARTITION BY session_key, driver_number ORDER BY lap_number DESC
+            ) AS n
+        FROM fct_lap_position
+    )
+    WHERE n = 1
 ),
 swaps AS (
     SELECT session_key, driver_number, cause, sum(delta) AS net
     FROM (
         SELECT session_key, gaining_driver AS driver_number, cause, 1 AS delta
-        FROM core.fct_position_swap
+        FROM fct_position_swap
         UNION ALL
         SELECT session_key, losing_driver, cause, -1
-        FROM core.fct_position_swap
-    ) AS s
+        FROM fct_position_swap
+    )
     GROUP BY session_key, driver_number, cause
 ),
 -- Cars that were ahead at the end of the previous lap and did not complete this lap.
 retired_ahead AS (
     SELECT me.session_key, me.driver_number, count(*) AS n
-    FROM core.fct_lap_position AS me
-    JOIN core.fct_lap_position AS me_prev
+    FROM fct_lap_position AS me
+    JOIN fct_lap_position AS me_prev
         ON me_prev.session_key = me.session_key
        AND me_prev.driver_number = me.driver_number
        AND me_prev.lap_number = me.lap_number - 1
-    JOIN core.fct_lap_position AS other_prev
+    JOIN fct_lap_position AS other_prev
         ON other_prev.session_key = me.session_key
        AND other_prev.lap_number = me_prev.lap_number
        AND other_prev.position < me_prev.position
-    WHERE NOT EXISTS (
-        SELECT 1 FROM core.fct_lap_position AS o
-        WHERE o.session_key = me.session_key
-          AND o.driver_number = other_prev.driver_number
-          AND o.lap_number = me.lap_number
-    )
+    LEFT ANTI JOIN fct_lap_position AS o
+        ON o.session_key = me.session_key
+       AND o.driver_number = other_prev.driver_number
+       AND o.lap_number = me.lap_number
     GROUP BY me.session_key, me.driver_number
 ),
 -- Cars ahead at the end of this lap that have no row for the previous lap (a lap
 -- missing in the source data); counted against the driver.
 appeared_ahead AS (
     SELECT me.session_key, me.driver_number, count(*) AS n
-    FROM core.fct_lap_position AS me
-    JOIN core.fct_lap_position AS me_prev
+    FROM fct_lap_position AS me
+    JOIN fct_lap_position AS me_prev
         ON me_prev.session_key = me.session_key
        AND me_prev.driver_number = me.driver_number
        AND me_prev.lap_number = me.lap_number - 1
-    JOIN core.fct_lap_position AS other
+    JOIN fct_lap_position AS other
         ON other.session_key = me.session_key
        AND other.lap_number = me.lap_number
        AND other.position < me.position
-    WHERE NOT EXISTS (
-        SELECT 1 FROM core.fct_lap_position AS o
-        WHERE o.session_key = me.session_key
-          AND o.driver_number = other.driver_number
-          AND o.lap_number = me_prev.lap_number
-    )
+    LEFT ANTI JOIN fct_lap_position AS o
+        ON o.session_key = me.session_key
+       AND o.driver_number = other.driver_number
+       AND o.lap_number = me_prev.lap_number
     GROUP BY me.session_key, me.driver_number
 ),
 -- The driver's own position change across a lap missing in the source data.
@@ -87,9 +86,9 @@ missing_lap AS (
             position,
             lag(lap_number) OVER w AS prev_lap,
             lag(position) OVER w AS prev_position
-        FROM core.fct_lap_position
+        FROM fct_lap_position
         WINDOW w AS (PARTITION BY session_key, driver_number ORDER BY lap_number)
-    ) AS l
+    )
     WHERE prev_lap <> lap_number - 1
     GROUP BY session_key, driver_number
 ),
@@ -99,9 +98,9 @@ stops AS (
         driver_number,
         count(*) AS n_stops,
         count(*) FILTER (WHERE is_under_neutralisation) AS n_stops_under_neutralisation,
-        round(sum(pit_loss_s) FILTER (WHERE NOT is_under_neutralisation)::numeric, 1)
+        round(sum(pit_loss_s) FILTER (WHERE NOT is_under_neutralisation), 1)
             AS green_pit_loss_s
-    FROM core.fct_pit_stop
+    FROM fct_pit_stop
     WHERE is_real_stop
     GROUP BY session_key, driver_number
 ),
@@ -109,9 +108,9 @@ tyres AS (
     SELECT
         session_key,
         driver_number,
-        round(avg(deg_s_per_lap)::numeric, 3) AS avg_deg_s_per_lap,
+        round(avg(deg_s_per_lap), 3) AS avg_deg_s_per_lap,
         max(stint_length) AS longest_stint
-    FROM core.fct_stint
+    FROM fct_stint
     GROUP BY session_key, driver_number
 ),
 undercuts AS (
@@ -120,7 +119,7 @@ undercuts AS (
         driver_number,
         count(*) AS n_undercut_attempts,
         count(*) FILTER (WHERE is_success) AS n_undercut_successes
-    FROM core.fct_undercut_attempt
+    FROM fct_undercut_attempt
     GROUP BY session_key, driver_number
 ),
 outcome AS (
@@ -131,8 +130,8 @@ outcome AS (
         ll.last_lap_position,
         r.finish_position IS NOT NULL AND r.grid_position IS NOT NULL AND NOT r.dsq
             AND lap1.position IS NOT NULL AS is_split
-    FROM core.fct_race_result AS r
-    LEFT JOIN core.fct_lap_position AS lap1
+    FROM fct_race_result AS r
+    LEFT JOIN fct_lap_position AS lap1
         ON lap1.session_key = r.session_key
        AND lap1.driver_number = r.driver_number
        AND lap1.lap_number = 1
@@ -192,7 +191,4 @@ LEFT JOIN stops AS st
 LEFT JOIN tyres AS ty
     ON ty.session_key = o.session_key AND ty.driver_number = o.driver_number
 LEFT JOIN undercuts AS uc
-    ON uc.session_key = o.session_key AND uc.driver_number = o.driver_number;
-
-CREATE UNIQUE INDEX ON marts.mart_race_outcome (session_key, driver_number);
-CREATE INDEX ON marts.mart_race_outcome (circuit_short_name, season);
+    ON uc.session_key = o.session_key AND uc.driver_number = o.driver_number

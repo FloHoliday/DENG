@@ -36,14 +36,11 @@ pluginDefaults:
       taskRunner:
         type: io.kestra.plugin.scripts.runner.docker.Docker
         pullPolicy: NEVER  # built locally with `docker compose build code`
-        networkMode: deng_default
         volumes:
           - "deng_raw_data:/app/data"  # named volume from docker-compose.yml
       env:
-        POSTGRES_HOST: postgres
-        POSTGRES_DB: "{{ envs.postgres_db }}"
-        POSTGRES_USER: "{{ envs.postgres_user }}"
-        POSTGRES_PASSWORD: "{{ envs.postgres_password }}"
+        # Root of the lake (raw/, bronze/, silver/, gold/); gs://<bucket> once GCP is set up.
+        LAKE_URI: /app/data
 
 tasks:
   - id: check_source
@@ -81,24 +78,27 @@ tasks:
             python scripts/fetch.py
             --meeting-key {{ outputs.find_race.vars.meeting_key }}
 
-      - id: load
+      - id: bronze
         type: io.kestra.plugin.scripts.shell.Commands
         commands:
           - cd /app
           - >-
-            python scripts/load.py
+            python scripts/bronze.py
             --meeting-key {{ outputs.find_race.vars.meeting_key }}
 
-      - id: transform
-        type: io.kestra.plugin.scripts.shell.Commands
-        commands:
-          - cd /app
-          - python scripts/transform.py
-
-      - id: validate
+      # silver and gold rebuild the race only if its input changed, and fail if it is not built.
+      - id: silver
         type: io.kestra.plugin.scripts.shell.Commands
         commands:
           - cd /app
           - >-
-            python scripts/validate.py
+            python scripts/silver.py
+            --meeting-key {{ outputs.find_race.vars.meeting_key }}
+
+      - id: gold
+        type: io.kestra.plugin.scripts.shell.Commands
+        commands:
+          - cd /app
+          - >-
+            python scripts/gold.py
             --meeting-key {{ outputs.find_race.vars.meeting_key }}
