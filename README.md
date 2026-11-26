@@ -168,10 +168,11 @@ the command exits with an error if one fails.
 
 ### 2.3 Query the data
 
-The gold tables are in the BigQuery dataset `gold` of the GCP project
-(`terraform output gold_dataset`). Open the [BigQuery console](https://console.cloud.google.com/bigquery),
-select the project and run the queries below in a new SQL tab. The dataset appears in
-the explorer on the left, where every table has its schema and a row preview.
+For now the gold tables are Delta tables in the lake (`gold/`). Once gold moves to
+BigQuery (see the status note at the top), they are in the dataset `gold` of the GCP
+project (`terraform output gold_dataset`). Open the
+[BigQuery console](https://console.cloud.google.com/bigquery), select the project and run
+the queries below in a new SQL tab.
 
 **Reference race: 2026 Singapore Grand Prix** (`session_key = 11388`). These numbers are
 the same on every machine:
@@ -407,8 +408,11 @@ so that Kestra and `docker compose run` use the new version.
 
 ## 7. Data models (transformation)
 
-ELT on a medallion lakehouse: the data is stored as received first, then typed, cleaned
-and modelled with Spark SQL, one race at a time.
+ELT into the lakehouse: the data is loaded into the lake as received first, then typed,
+cleaned and modelled there with Spark SQL, one race at a time. The lakehouse is the
+target system, so the transformation happens inside it. BigQuery will only serve gold:
+Spark builds the finished tables and publishes them there. BigQuery itself does no
+transformation, so from BigQuery's side that last step is ETL.
 
 ```text
 raw (JSON files)  →  bronze (typed)  →  silver (cleaned)  →  gold (facts + mart, for the strategist)
@@ -547,7 +551,7 @@ flowchart LR
         s[("silver/<br/>Delta")]
         g[("gold/<br/>Delta, later BigQuery")]
     end
-    user["Strategist<br/>BigQuery console"]
+    user["Strategist<br/>BigQuery console (after the GCP move)"]
     source --> check & find & fetch
     fetch --> raw --> bronze --> b --> silver --> s --> gold --> g --> user
 ```
